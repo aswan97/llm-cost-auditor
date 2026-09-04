@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the CLAUDE.md rule: never write a price as a literal.
+"""Enforce the AGENTS.md rule: never write a price as a literal.
 
 Scans the package for numeric literals bound to price-shaped names outside the
 pricing module. Rates, multipliers, and thresholds must come from the price
@@ -113,7 +113,7 @@ def main() -> int:
         problems += check_file(path)
 
     if problems:
-        print("Price literals found (see CLAUDE.md: never write a price as a literal):\n")
+        print("Price literals found (see AGENTS.md: never write a price as a literal):\n")
         for problem in problems:
             print(f"  {problem}")
         print(

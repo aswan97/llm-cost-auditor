@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 LLM cost & routing auditor. Full design: [SPEC.md](SPEC.md). Python 3.12+.
 

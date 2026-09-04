@@ -4,7 +4,7 @@
 
 ## Verification
 
-<!-- Green CI is necessary, not sufficient (CLAUDE.md). For anything touching cost math: -->
+<!-- Green CI is necessary, not sufficient (AGENTS.md). For anything touching cost math: -->
 
 - [ ] Ran the CLI end to end on sample logs (`ingest` → `profile` → `audit`), not just the test suite
 - [ ] Read the generated report — findings, ranking, and evidence make sense for that traffic

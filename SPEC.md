@@ -174,7 +174,7 @@ Each of these silently corrupts cost math if ignored.
 
 ### 7.1 Price table
 
-All prices live in a **single versioned price table** — data, never code. It is the only place a monetary rate exists anywhere in the system (see `CLAUDE.md`: no price literals, ever).
+All prices live in a **single versioned price table** — data, never code. It is the only place a monetary rate exists anywhere in the system (see `AGENTS.md`: no price literals, ever).
 
 **Contents.** Base rates transcribed from **publicly available provider pricing pages**, per model and per provider/broker (first-party Anthropic and OpenAI rates differ from the same model's Bedrock, Vertex, and Foundry rates, so each is its own row):
 
