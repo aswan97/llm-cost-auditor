@@ -1,0 +1,57 @@
+name: Release check
+
+# Runs only on the develop -> main release PR. Verifies the release is
+# properly prepared before it can be merged; the tag is cut after merge.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  release-ready:
+    name: Release readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Source branch must be develop or hotfix/*
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          case "$BRANCH" in
+            develop|hotfix/*) echo "source branch: $BRANCH" ;;
+            *) echo "::error::main only accepts merges from develop or hotfix/* (got '$BRANCH'). See CONTRIBUTING.md."; exit 1 ;;
+          esac
+
+      - name: Version must be bumped above the latest tag
+        run: |
+          VERSION=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          echo "pyproject version: $VERSION / latest tag: ${LATEST:-none}"
+          if [ -n "$LATEST" ] && [ "v$VERSION" = "$LATEST" ]; then
+            echo "::error::pyproject version $VERSION is unchanged since $LATEST. Bump it in the release PR."
+            exit 1
+          fi
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: CHANGELOG must document this version
+        run: |
+          if ! grep -q "^## \[$RELEASE_VERSION\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$RELEASE_VERSION]' section."
+            exit 1
+          fi
+          if grep -q "^## \[Unreleased\]" CHANGELOG.md; then
+            UNRELEASED=$(awk '/^## \[Unreleased\]/{flag=1;next}/^## \[/{flag=0}flag' CHANGELOG.md | grep -v '^\s*$' | grep -v '^###' || true)
+            if [ -n "$UNRELEASED" ]; then
+              echo "::warning::Unreleased section is non-empty; those entries will not appear in this release's notes."
+            fi
+          fi
+
+      - name: Summary
+        run: |
+          echo "Release $RELEASE_VERSION is ready to merge." >> "$GITHUB_STEP_SUMMARY"
+          echo "After merge, tag main: \`git tag -a v$RELEASE_VERSION -m 'Release v$RELEASE_VERSION' && git push origin v$RELEASE_VERSION\`" >> "$GITHUB_STEP_SUMMARY"

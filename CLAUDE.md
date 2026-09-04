@@ -35,6 +35,12 @@ Report what actually happened. If a run produced a suspicious number, say so wit
 
 ## Rules
 
+### Branch from develop, never commit to main or develop
+
+All work happens on `feature/*`, `fix/*`, `docs/*`, or `chore/*` branched from `develop`, and reaches `develop` through a PR. `main` is production and only ever receives a release PR from `develop` (or a `hotfix/*` from `main` itself, which must then be merged back to `develop`). Full model and release steps: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Before starting work: `git checkout develop && git pull && git checkout -b feature/<slug>`. Rebase on `develop` rather than merging it in.
+
 ### Never write a price as a literal
 
 No monetary rate, cost multiplier, or discount factor may appear as a literal anywhere outside the price table (§7.1). This includes:
@@ -54,6 +60,8 @@ mult = pricing.multiplier(provider, model, "cache_read", at=ts)  # not: 0.1
 **Why:** prices change, differ per broker (Anthropic vs Bedrock vs Vertex vs Foundry rates diverge for the same model), and every request must be priced at the rate in force at *its own* timestamp. A literal anywhere silently desynchronizes from the catalog and corrupts savings math with no test failure. Tests use fixture catalogs, not inline numbers.
 
 Prices load lazily and are memoized per `(provider, model, timestamp)` — never eager-load the catalog at import or CLI startup.
+
+This rule is enforced in CI by `scripts/check_price_literals.py`, which fails the build on a numeric literal bound to a price-shaped name outside the pricing module. If something genuinely is not a price, append `# noqa: price-literal` with a justification rather than renaming around the check.
 
 ### Test against hand-computed fixtures, and assert exact equality
 
