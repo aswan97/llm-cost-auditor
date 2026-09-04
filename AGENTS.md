@@ -58,6 +58,17 @@ Concretely:
 
 Adding a "just for debugging" print of a resolved credential is the kind of change that gets shipped and then found by someone else, so it does not get written in the first place.
 
+### Don't write cryptography, and don't let it drift
+
+The sealed store (SPEC §6.7) uses libsodium primitives — Argon2id, XChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256 — through one module. Rules that follow from that:
+
+- **No primitive is implemented here**, and none is composed ad hoc elsewhere. Encrypting something new means calling that module, not importing a cipher.
+- **Parameters travel with the ciphertext.** KDF cost, salt, nonce, and algorithm names live in the envelope header, never as an assumption about what the current build uses. A reader that encounters an unknown envelope version fails; it never infers one. Raising a cost parameter must leave existing stores openable, which is what `credentials rekey` is for.
+- **Nothing is encrypted with a key stored next to it.** That is filing, not encryption, and it is worse than plaintext because it reads as safe.
+- **Fail closed, always.** Authentication failure returns an error and no bytes — never partial plaintext, never a fallback path, never a "decrypt without verifying" branch for recovery.
+- **Test the failures, not just the success.** Tamper with ciphertext, nonce, associated data, and header; use the wrong passphrase; swap a record between refs; roll back the index. Each must fail closed and say so. A round-trip test alone proves only that the code can talk to itself.
+- **Never invent a threat claim.** The store protects a stolen file. It does not protect a compromised host or an unlocked process, and no doc, log line, or UI string should imply otherwise.
+
 ### Never write a price as a literal
 
 No monetary rate, cost multiplier, or discount factor may appear as a literal anywhere outside the price table (§7.1). This includes:

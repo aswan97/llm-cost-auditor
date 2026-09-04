@@ -138,7 +138,7 @@ local files · S3 · Azure Blob
 ### 5.1 Stack
 
 - **Python 3.12+**, `polars` (in-memory frames), `pydantic` v2 (models/config), `typer` (CLI), `jinja2` (report), `datasketch`-style MinHash/LSH (vendored or dependency), provider tokenizers behind an optional extra.
-- **Credential storage delegates to the platform**: `keyring` for the OS-native backend, and a vetted AEAD + memory-hard KDF implementation for the sealed-file fallback (§6.7). No cryptographic primitive is implemented here.
+- **Credential storage delegates to the platform**: `keyring` for OS-native root-key custody, and `pynacl` (libsodium) for Argon2id, XChaCha20-Poly1305, and HMAC in the sealed store (§6.7). No cryptographic primitive is implemented here, and the algorithm choice lives in one module whose parameters are written into every envelope.
 - **Cloud SDKs are optional extras, one per connector** (`boto3` for `s3`, `azure-storage-blob` + `azure-identity` for `az`). A local-files audit must not pull two clouds' SDKs, and a missing extra produces "install `llm-cost-auditor[s3]`", not an import error.
 - **Web app: `fastapi` + `uvicorn`, server-rendered `jinja2`, HTMX for interactivity.** No JavaScript build step, no second language, no SPA. The same template layer renders both the app's pages and the exported static report, so the two cannot drift. HTMX covers the interactions v1 actually needs — polling a running job, filtering and sorting a findings table, expanding evidence, submitting config — and a page that genuinely outgrows it is the signal to reconsider, not a reason to start with React. Charts are server-rendered inline SVG for the same reason.
 - **In-memory processing** targeting up to ~500k requests per run on a laptop. Storage is behind a `Store` seam (`load()`, `iter_records()`, `persist_derived()`) so it can be swapped for DuckDB/Parquet without touching analyzers.
@@ -360,12 +360,44 @@ Ambient credentials (§6.1) cover the deployed case and none of the common one: 
 | | `azure_client_secret` | Service principal: tenant id, client id, secret. Scoped by RBAC role assignment. |
 | | `azure_storage_key` | Account key. Full control of the whole account; accepted, discouraged in the UI, and never the default. |
 
-**Two backends, no invented cryptography.**
+#### One encrypted store, two ways to get the key
 
-1. **OS keyring (default)** — macOS Keychain, Windows Credential Manager, Linux Secret Service. The operating system owns the key material and its unlock policy; the app stores nothing itself. Keyring entries are namespaced by workspace path so two workspaces cannot collide.
-2. **Encrypted file (headless and container fallback)** — a sealed file in the workspace, AEAD-encrypted under a key derived from a passphrase with a memory-hard KDF, mode `0600`. The passphrase comes from the environment or an interactive prompt **at `serve` startup**, never from the browser. That asymmetry is deliberate: the person at the terminal unlocks the store; a browser session can add a credential to an unlocked store but can never unlock one.
+Rather than two storage formats, there is **one sealed store** and two sources for its master key. The store is always encrypted; the backends differ only in who holds the 32-byte root key.
 
-**Write-only, from every direction.** The store accepts secrets and does not return them. There is no API endpoint, CLI command, template, or log line that emits a stored secret value — only metadata (kind, last four characters, created, last used, expiry). Retrieval happens in-process, when a connector asks for it, and nowhere else. An unauthenticated local server that can be asked to read back its own secrets turns any stray browser tab or local process into an exfiltration path.
+1. **OS keyring (default).** A random 32-byte root key is generated at store creation and kept in macOS Keychain, Windows Credential Manager, or Linux Secret Service, namespaced by workspace path. The OS owns the key and its unlock policy — Touch ID, login keychain, whatever the platform enforces — and the app never sees a passphrase.
+2. **Passphrase (headless and container installs).** The root key is derived from a passphrase, supplied by environment variable or an interactive prompt **at `serve` startup**, never from the browser. The asymmetry is deliberate: the person at the terminal unlocks the store; a browser session can add a credential to an unlocked store but can never unlock one.
+
+Because both paths converge on the same root key and the same file, switching between them is a **rekey**, not an export-and-reimport — the plaintext secrets are never handed back out to migrate them.
+
+#### Algorithms
+
+Named, not implemented. Everything below comes from libsodium via PyNaCl; no primitive is written in this project, and no algorithm is chosen at runtime by anything but the envelope header.
+
+| Purpose | Choice | Why this one |
+|---|---|---|
+| Passphrase → root key | **Argon2id** (RFC 9106), 16-byte random salt, moderate-or-higher interactive parameters (memory in the hundreds of MiB, opslimit ≥ 3) | Memory-hard, so a stolen file is expensive to attack offline with GPUs. Parameters are stored in the header, not assumed. |
+| Root key → per-record key | **HKDF-SHA-256**, `info = "cred/v1/" ‖ secret_ref` | One key per record, so a compromise is scoped and a record cannot be moved between refs. |
+| Record encryption | **XChaCha20-Poly1305-IETF**, 24-byte random nonce per write | AEAD with a nonce large enough that random generation is safe without a counter — the misuse that breaks AES-GCM deployments does not arise. |
+| Index integrity | **HMAC-SHA-256** over the record list and a monotonic version counter | Detects deletion and rollback of records, which per-record AEAD alone cannot see. |
+| Display fingerprint | first 8 hex of **HMAC-SHA-256**(display key, secret) | Lets a user confirm *which* secret is stored without revealing any of it. |
+| Access token check | constant-time comparison; persisted form is an **Argon2id** hash | A timing-safe compare, and a token file that is not a plaintext token. |
+
+**Per-record sealing, with context bound in.** Each credential is sealed individually under its own derived key, with associated data covering `envelope_version ‖ secret_ref ‖ kind ‖ created_at ‖ store_id`. Two consequences that whole-file encryption would not give:
+
+- **Records cannot be relabelled or swapped.** Moving the ciphertext for `prod-readonly` onto the ref `staging-readonly`, or editing a stored `kind` to make an account key look like a scoped SAS token, fails authentication instead of succeeding quietly. A connection therefore cannot be tricked into sending one account's key to another account's endpoint.
+- **Rotate and delete touch one record.** No rewriting the whole file, no window where every secret is in memory at once, and a corrupted record loses one credential rather than all of them.
+
+**Versioned envelope, no algorithm guessing.** Every record and the index carry an explicit `v1` naming the KDF, its parameters, the AEAD, and the salt/nonce. Readers refuse an unrecognized version outright rather than inferring one, and `credentials rekey` re-seals the store under current parameters — so raising Argon2id cost later does not strand an existing store, and a downgrade cannot be forced by editing a header.
+
+**Key and plaintext handling.** The root key is held in locked memory (`mlock`, no swap) and zeroed on lock, rekey, and exit; a per-record key exists only for the duration of one seal or open. Secret plaintext is held in mutable buffers that are zeroed after use. On disk the store is mode `0600` inside a `0700` directory, written by sealing into a temporary file and atomically renaming over the old one with an fsync — so an interrupted write cannot truncate the store, and no plaintext ever reaches a temporary file.
+
+> **Stated honestly:** Python cannot guarantee zeroization — an immutable `str` created anywhere in the path, a cloud SDK copying the value into its own signer, or a garbage-collected buffer may leave a copy behind. The buffers we control are wiped, the boundary where they stop being ours is the SDK call, and no claim beyond that is made.
+
+**What this does not protect against**, stated so nobody reads "encrypted" as "safe": a compromised host, a process already running with the store unlocked, a hostile dependency inside the process, a core dump, or a user who pastes a key into the wrong field. Encryption at rest protects a *stolen file* — a backup, a synced folder, a laptop — and that is precisely the threat it is here for.
+
+**Crypto correctness is tested as its own thing**, not implied by the feature working: known-answer vectors for the KDF and AEAD; a tamper suite flipping bits in ciphertext, nonce, associated data, and header and asserting each fails closed with no plaintext returned; a wrong passphrase asserting failure rather than garbage; a cross-ref swap asserting rejection; a rolled-back index asserting detection; and a rekey round-trip asserting every ref still opens.
+
+**Write-only, from every direction.** The store accepts secrets and does not return them. There is no API endpoint, CLI command, template, or log line that emits a stored secret value — only metadata: kind, display fingerprint, created, last used, expiry, and any non-secret identifier the kind carries (an AWS access key *id* is not a secret; its secret half never appears). Retrieval happens in-process, when a connector asks for it, and nowhere else. An unauthenticated local server that can be asked to read back its own secrets turns any stray browser tab or local process into an exfiltration path.
 
 **The bind interlock.** §12 says the server ships without authentication because a single-tenant local server has nothing to authenticate. A credential store changes that fact, so the rule changes with it:
 
@@ -781,7 +813,7 @@ The tool runs on user infrastructure and may see prompt content. Becoming a serv
 - **The app makes no outbound calls of its own** — no CDN assets, no telemetry, no update check. Every asset is served from the package, which is also why the CSP can forbid external origins outright. The only outbound calls in the entire system remain the opt-in replay calls of §10.3.
 - **Uploaded logs are treated as ingest input, not as stored files.** They pass through the same redaction and fingerprinting pipeline (layers 1–2) and the upload is discarded; the run keeps derived records only.
 - **The API is CSRF-protected and path-confined.** State-changing endpoints require a same-origin token, and any server-side path the UI accepts (log locations, output directories) is resolved and confined to configured roots — a browser-reachable process that reads arbitrary filesystem paths is a file-disclosure bug regardless of who is on the other end. The same confinement governs remote reads: runs name a **configured connection**, never an arbitrary URI (§6.1).
-- **Credentials, when stored, are encrypted and write-only** (§6.7). Ambient identity — instance profile, managed identity, named profile — remains the default and the recommendation. Where a user has no ambient identity to borrow, the credential store holds the secret in the OS keyring or a passphrase-sealed file, returns it to nobody, and never writes it into a run record, log, event stream, or report.
+- **Credentials, when stored, are encrypted and write-only** (§6.7). Ambient identity — instance profile, managed identity, named profile — remains the default and the recommendation. Where a user has no ambient identity to borrow, each secret is sealed individually with XChaCha20-Poly1305 under a per-record key, the root key living in the OS keyring or derived from a passphrase with Argon2id. The store returns a secret to nobody and never writes one into a run record, log, event stream, or report.
 - **Holding credentials is what makes authentication necessary.** A non-empty credential store plus a non-loopback bind makes `serve` refuse to start without an access token (§6.7). The no-accounts stance (§2) is intact — this is one shared token gating the port, not an identity system — but "unauthenticated" and "holds cloud keys on a shared interface" is a combination the tool will not let a user assemble by accident.
 
 The four content layers are unchanged:
@@ -789,7 +821,7 @@ The four content layers are unchanged:
 1. **Never persist raw content.** Hashing and fingerprinting happen at ingest; raw text exists only in memory for the chunk being processed. The derived store contains no prompt text.
 2. **Redact before persisting anything derived.** Configurable detectors for emails, keys/tokens, card numbers, national ids, and user-supplied patterns; redaction runs before any storage and before any replay transmission.
 3. **Evidence samples are opt-in.** By default findings cite fingerprints, counts, and token statistics. Real prompt excerpts appear only when explicitly enabled.
-4. **Encrypted local store with retention.** At-rest encryption for the derived database plus a TTL that purges ingested data after N days (default 30).
+4. **Encrypted local store with retention.** At-rest encryption for the derived database — the same sealed-envelope construction and key custody as the credential store (§6.7), so there is one encryption implementation in the project and one place to review it — plus a TTL that purges ingested data after N days (default 30).
 
 Any outbound call (replay, embedding, judging) is gated per §10.3 and fully itemized in the report.
 
@@ -813,7 +845,7 @@ Starts the local server and prints the URL. Single tenant, no accounts (§12).
 |---|---|
 | **Runs** | Every run in the store: status, window, source, baseline spend, portfolio savings, timestamp. Start a new run from here. |
 | **Connections** | The saved log sources (§6.6): add or edit a connection, **test** it (credentials resolve, prefix lists, permissions exercised are named), and **preview** — the first N records decoded, with the detected format, provider, fidelity tier, and observed time range, before committing to a full run. |
-| **Credentials** | The credential store (§6.7): add, rotate, and delete secrets by reference, choosing a kind from the preference-ordered list. Entry fields are write-only — a stored secret is shown as kind, last four, created, last used, and expiry, and there is no view that reveals it. Expiring credentials and aged long-lived keys are flagged here, along with which connections depend on each ref. Unavailable while the file backend is locked, with instructions to unlock at the terminal. |
+| **Credentials** | The credential store (§6.7): add, rotate, and delete secrets by reference, choosing a kind from the preference-ordered list. Entry fields are write-only — a stored secret is shown as kind, display fingerprint, created, last used, and expiry, and there is no view that reveals it. Expiring credentials and aged long-lived keys are flagged here, along with which connections depend on each ref. Unavailable while the file backend is locked, with instructions to unlock at the terminal. |
 | **New run** | Pick a connection (or upload files, or point at a local path within the configured roots), set the window, attach `workloads.yaml` / `architecture.yaml` / commercial terms if any, pre-flight validation — including an object count and byte estimate for the window, so a run nobody meant to start is visible before it starts — then submit. |
 | **Run overview** | The executive section (§3) for one run: baseline spend decomposed by workload, model, token class and status; waste percentage; portfolio total with the "sum of marginals" statement next to it; totals broken out per confidence tier. |
 | **Findings** | Sortable, filterable table — by analyzer, workload, confidence tier, risk, effort, realizability. Each row expands into the engineering detail: evidence, the exact change, verification steps, and both standalone and marginal savings. |
@@ -849,7 +881,7 @@ GET    /api/connections           list saved connections (§6.6)
 POST   /api/connections/{id}/test resolve credentials, list the prefix, report permissions exercised
 POST   /api/connections/{id}/peek decode the first N objects: detected format, source, fidelity, time range
 
-GET    /api/credentials           metadata only: ref, kind, last four, created, last used, expiry (§6.7)
+GET    /api/credentials           metadata only: ref, kind, fingerprint, created, last used, expiry (§6.7)
 PUT    /api/credentials/{ref}     store or rotate a secret — write-only, no reciprocal GET
 DELETE /api/credentials/{ref}     delete, naming the connections it breaks
 ```
@@ -870,7 +902,8 @@ llm-cost-auditor ingest   <uri...|connection-id> --source anthropic|openai|bedro
 llm-cost-auditor connections [list | test <id> | peek <id> [-n 100]]
 llm-cost-auditor credentials [list | add <ref> --kind aws_role|aws_access_key|azure_sas|
                                                     azure_client_secret|azure_storage_key
-                              | rotate <ref> | rm <ref> | test <ref>]
+                              | rotate <ref> | rm <ref> | test <ref>
+                              | rekey [--to keyring|passphrase]]   # re-seal under current params
                           # secret values are read from stdin or an interactive prompt,
                           # never from argv; `list` prints metadata only (§6.7)
 llm-cost-auditor profile  [--emit-config workloads.yaml] [--emit-architecture architecture.yaml]
