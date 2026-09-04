@@ -29,7 +29,13 @@ This tool finds those, quantifies them, and tells you the specific change to mak
 
 ## Sources
 
-Anthropic, OpenAI, and cloud brokers (AWS Bedrock, Google Vertex AI, Azure AI Foundry) — each with its own price sheet, log shape, and reserved-capacity handling. Gateway logs (LiteLLM, OpenRouter, Helicone) are planned.
+Two independent axes — where the logs live, and what they mean — so any combination works without a bespoke integration.
+
+**Where** (connectors): local files and globs, **Amazon S3** (`s3://`, including S3-compatible endpoints), **Azure Blob Storage** (`az://`). Google Cloud Storage follows in v1.1. Compression and container format — gzip/zstd, JSONL, JSON, CSV, Parquet, CloudWatch export envelopes, Azure Monitor diagnostic blobs — are detected and reported, never assumed silently.
+
+Connections are saved by name and hold **no secrets**: cloud credentials resolve from the host's own chain (instance profile, managed identity, or a named local profile), read-only. Objects are streamed rather than downloaded, the audit window prunes the listing, and every object read is recorded so re-audits are incremental and double counting is detectable. An object that cannot be read is a *coverage failure* naming the gap — never silently less data.
+
+**What** (source adapters): Anthropic, OpenAI, and cloud brokers (AWS Bedrock, Google Vertex AI, Azure AI Foundry) — each with its own price sheet, log shape, and reserved-capacity handling. Gateway logs (LiteLLM, OpenRouter, Helicone) are planned.
 
 ## Intended usage
 
@@ -48,6 +54,7 @@ It is single-tenant and binds localhost by default: there are no accounts, becau
 Every operation the app performs is a command first, so audits fit in CI and cron:
 
 ```bash
+llm-cost-auditor ingest  s3://acme-llm-logs/bedrock/ --source bedrock --window 2026-08-01..2026-08-31
 llm-cost-auditor ingest  ./logs/*.jsonl --source anthropic
 llm-cost-auditor profile --emit-config workloads.yaml --emit-architecture architecture.yaml
 llm-cost-auditor audit   --config workloads.yaml --architecture architecture.yaml \

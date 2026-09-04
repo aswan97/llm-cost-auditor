@@ -2,7 +2,7 @@
 
 **Status:** Draft v1.1 · **Date:** 2026-09-04 · **Repo:** `llm-cost-auditor`
 
-*Changed in v1.1: the auditor is a self-hosted platform (local web app + CLI over one run engine), not an offline CLI. See §1, §3, §4, §5.3–5.4, §12, §13.*
+*Changed in v1.1: the auditor is a self-hosted platform (local web app + CLI over one run engine), not an offline CLI — §1, §3, §4, §5.3–5.4, §12, §13. Log sources are pluggable connectors (local files, S3, Azure Blob) separate from source adapters — §6.1, §6.6.*
 
 ---
 
@@ -79,8 +79,8 @@ The data model, pricing engine, workload profiler, confidence framework, and att
 
 | Release | Surface |
 |---|---|
-| **v1** | CLI over the run engine; run store on disk (§5.3); web app covering the core loop — upload/point at logs, run, browse findings, view coverage, download the report |
-| **v1.1** | In-app config editing with validation and re-run; run comparison (`verify` diff) in the UI |
+| **v1** | CLI over the run engine; run store on disk (§5.3); connectors for local files, S3, and Azure Blob (§6.1); web app covering the core loop — connect a log source, run, browse findings, view coverage, download the report |
+| **v1.1** | GCS connector; in-app config editing with validation and re-run; run comparison (`verify` diff) in the UI |
 | **v1.2** | Replay budget approval flow in the app (a dry-run estimate the user confirms before any outbound call, §10.3) |
 
 The app is not deferred to a "phase 2" — a run that only a CLI can start is not the product described in §1 — but within v1 it is built after the first analyzer produces real findings, not before.
@@ -100,9 +100,9 @@ The engine is a pure pipeline from logs to findings. The web app and the CLI are
         │    Run engine      │   run record + status + artifacts → run store (§5.3)
         └──────────┬─────────┘
                    ▼
-log files / exports
-      │
-      ▼
+local files · S3 · Azure Blob
+      │                                connectors: locate + stream bytes (§6.1)
+      ▼                                decode: decompress + container format
 ┌───────────────┐   per-source adapters (Anthropic, OpenAI, Bedrock, Vertex, Foundry)
 │   Ingest      │   normalize → canonical RequestRecord
 │               │   redact → fingerprint → (optionally) discard raw text
@@ -138,6 +138,7 @@ log files / exports
 ### 5.1 Stack
 
 - **Python 3.12+**, `polars` (in-memory frames), `pydantic` v2 (models/config), `typer` (CLI), `jinja2` (report), `datasketch`-style MinHash/LSH (vendored or dependency), provider tokenizers behind an optional extra.
+- **Cloud SDKs are optional extras, one per connector** (`boto3` for `s3`, `azure-storage-blob` + `azure-identity` for `az`). A local-files audit must not pull two clouds' SDKs, and a missing extra produces "install `llm-cost-auditor[s3]`", not an import error.
 - **Web app: `fastapi` + `uvicorn`, server-rendered `jinja2`, HTMX for interactivity.** No JavaScript build step, no second language, no SPA. The same template layer renders both the app's pages and the exported static report, so the two cannot drift. HTMX covers the interactions v1 actually needs — polling a running job, filtering and sorting a findings table, expanding evidence, submitting config — and a page that genuinely outgrows it is the signal to reconsider, not a reason to start with React. Charts are server-rendered inline SVG for the same reason.
 - **In-memory processing** targeting up to ~500k requests per run on a laptop. Storage is behind a `Store` seam (`load()`, `iter_records()`, `persist_derived()`) so it can be swapped for DuckDB/Parquet without touching analyzers.
 - **Rust-portability discipline.** The three hot paths — prefix trie construction, MinHash/LSH, and the discrete-event cache simulator — live behind narrow, pure interfaces with no framework coupling, so each can be replaced by a Rust extension (PyO3) independently if profiling demands it. Everything else stays Python.
@@ -166,7 +167,8 @@ A run is a directory under the workspace root (`./.llm-cost-auditor/runs/<run_id
 
 ```
 runs/<run_id>/
-  run.json          status, timings, config digest, catalog version, source paths, error (if any)
+  run.json          status, timings, config digest, catalog version, connection ids, error (if any)
+  manifest.json     every object consumed: uri, etag, size, bytes read, records parsed (§6.6)
   records.parquet   normalized RequestRecords for this run (derived, redacted — never raw prompt text)
   findings.json     the finding set (§13.4)
   snapshot.json     the verification baseline (§13.6)
@@ -194,7 +196,72 @@ An audit takes minutes, not milliseconds, so the app cannot run one inside a req
 
 ## 6. Ingest
 
-### 6.1 Sources (v1)
+Ingest has two orthogonal questions, and conflating them is how log tooling ends up with `s3_anthropic_gzip_reader`:
+
+- **Where do the bytes live?** — a **connector** (§6.1). Local disk, S3, Azure Blob.
+- **What do the bytes mean?** — a **source adapter** (§6.2). Anthropic, OpenAI, Bedrock, Vertex, Foundry.
+
+They compose freely: Bedrock logs in S3, Bedrock logs on a laptop, and Anthropic logs in Azure Blob are three combinations of two connectors and two adapters, not three integrations. Between them sit two format concerns — compression and container format — that belong to neither.
+
+```
+connector (locate + fetch)  →  decode (decompress + container)  →  adapter (interpret)  →  RequestRecord
+   file:// s3:// az://           .gz/.zst · jsonl/json/csv/           anthropic/openai/
+                                 parquet/cloudwatch/azure-monitor      bedrock/vertex/foundry
+```
+
+### 6.1 Connectors — where the logs live
+
+Nobody audits a bill from logs that are already on their laptop. Real provider logs land in object storage — an S3 bucket fed by Bedrock model-invocation logging, an Azure Blob container fed by Foundry diagnostic settings, a nightly export dropped on a share — and the tool is useless if getting at them is the user's problem.
+
+**v1 connectors:**
+
+| Connector | URI | Notes |
+|---|---|---|
+| **Local** | `file:///path`, plain paths, globs | Files and directories, recursive. The development and first-run path, and the one every fixture uses. |
+| **Amazon S3** | `s3://bucket/prefix/` | Bedrock model-invocation logs and CloudWatch Logs exports both land here. Also S3-compatible endpoints (MinIO, R2) via an explicit `endpoint_url`. |
+| **Azure Blob Storage** | `az://container/prefix/` | Where Azure AI Foundry diagnostic settings and Azure Monitor archives land, in the `y=/m=/d=/h=/` layout. |
+
+Google Cloud Storage (`gs://`) follows in v1.1. The cloud **log query APIs** — CloudWatch Logs, Azure Monitor / Log Analytics, Google Cloud Logging — are deliberately *not* v1 connectors: they are paginated query interfaces with their own quotas, retention, and per-GB scan costs, not object stores, and every one of them can export to a bucket the tool already reads. The blob path is cheaper for the user and simpler for us; the query APIs are revisited only if export turns out not to be an option in practice (§16).
+
+**Build order** (AGENTS.md): local first, S3 second, and the `Connector` protocol is *extracted* once S3 exists — the interface that fits a local directory will be wrong about pagination, listing cost, retries, and credentials. Azure Blob is the third and is written against the extracted protocol as the test of whether it generalized.
+
+**The protocol is narrow on purpose.** Listing and byte streams, nothing else — no parsing, no provider knowledge, no caching policy:
+
+```python
+class Connector(Protocol):
+    scheme: str
+
+    def list(self, prefix: str, since: datetime | None, until: datetime | None) -> Iterator[ObjectRef]: ...
+        # ObjectRef: uri, size_bytes, last_modified, etag
+
+    def open(self, ref: ObjectRef) -> BinaryIO: ...
+        # streaming; the caller never holds a whole object in memory
+```
+
+**Rules:**
+
+- **Stream, never download-and-parse.** Objects are read as bounded-buffer streams and decompressed on the fly, with a small prefetch pool so network latency overlaps parsing. A day of logs is routinely larger than RAM, and the in-memory budget (§5.1) is for normalized records, not raw bytes.
+- **Prune the listing with the window, not the parser.** Connections declare a partition template (`y=%Y/m=%m/d=%d/`); an audit window is expanded into the key prefixes it can possibly touch, so a one-week audit against three years of logs lists a week of keys. Where no template applies, `last_modified` filters the listing, and records outside the window are still dropped after decode — log files do not align with audit windows. The report states the requested window and the observed one.
+- **Credentials are referenced, never stored.** Each connector uses its cloud's own default credential chain — environment, instance profile / IRSA / managed identity, or a named local profile. A connection stores a *reference* (profile name, role ARN to assume, account and container), and **the UI has no secret field at all**. This is a direct consequence of §12: the server is unauthenticated by design, so it must not become a place where secrets live. Read-only permissions are what the docs ask for, and the connection test says which permissions were actually exercised.
+- **Only configured connections are readable.** A run names a connection; it cannot name an arbitrary URI. Without that rule an unauthenticated local server with an instance profile is a credential-borrowing exfiltration primitive — anything reachable in the browser could ask it to read any bucket the host can reach, and write nothing down. Path confinement for `file://` (§12) is the same rule wearing different clothes.
+- **A partial read is a failure, not less data.** A truncated gzip member, a permission-denied key, a listing that timed out mid-page: each marks the run's coverage incomplete, naming the skipped objects and their byte volume, and gates projections exactly as §11.4 does. Baseline spend computed over 87% of the logs is not a smaller number — it is a wrong one, and the failure mode this whole tool exists to avoid.
+- **Every object consumed is recorded** (§6.6), so re-ingest is incremental and double-counting is detectable rather than accidental.
+
+**Formats are a separate, shared layer** — every connector yields bytes, and the same decode stack handles all of them. Compression (`.gz`, `.zst`, `.bz2`) and container format are auto-detected from the key and the first bytes, always with an explicit override:
+
+| Container | Where it shows up |
+|---|---|
+| JSON Lines | The common case; one request per line |
+| JSON array / single object | Small exports and API dumps |
+| CloudWatch Logs export envelope | Gzipped objects whose records are wrapped in `logEvents[].message`, each message itself JSON |
+| Azure Monitor diagnostic blobs | `{"records": [...]}` per blob, in the hour-partitioned layout |
+| CSV, Parquet | Warehouse and billing-export extracts |
+
+Detection is reported, never assumed silently: the run record states the format and compression chosen per object, and an object that does not parse as its detected format is a coverage failure rather than a skipped line.
+
+**Connector conformance suite.** One shared test suite that every connector must pass — listing pagination, window pruning, an empty prefix, a truncated object, a permission-denied key, an object mutated between listing and read, and an object whose content type contradicts its extension. It runs against a local fake implementing the protocol, and against the cloud emulators (MinIO, Azurite) in CI. A connector is not done until it fails these the same way local does.
+
+### 6.2 Sources — what the logs mean (v1)
 
 | Source | Notes |
 |---|---|
@@ -204,7 +271,7 @@ An audit takes minutes, not milliseconds, so the app cannot run one inside a req
 
 Gateway logs (LiteLLM, OpenRouter, Helicone) are a post-v1 adapter that maps onto the same canonical record.
 
-### 6.2 Fidelity tiers
+### 6.3 Fidelity tiers
 
 Every dataset is classified, per-source, into the highest tier it supports. Mixed-tier datasets are supported; findings are tagged with the tier that produced them.
 
@@ -216,7 +283,7 @@ Every dataset is classified, per-source, into the highest tier it supports. Mixe
 
 **Design consequence:** Tier B is the recommended posture and the tool ships a reference "fingerprint sidecar" spec — a small library/logging snippet users add to their client so their logs become Tier B without ever storing prompt text.
 
-### 6.3 Canonical record
+### 6.4 Canonical record
 
 ```
 RequestRecord
@@ -232,7 +299,7 @@ RequestRecord
   batch_flag, region/deployment_id
 ```
 
-### 6.4 Normalization edge cases (all mandatory in v1)
+### 6.5 Normalization edge cases (all mandatory in v1)
 
 Each of these silently corrupts cost math if ignored.
 
@@ -240,6 +307,43 @@ Each of these silently corrupts cost math if ignored.
 2. **Failed / truncated / cancelled requests.** Input tokens are frequently billed despite an error; `stop_reason=max_tokens` truncations often mean the response was unusable and re-requested; client-cancelled streams still bill generated tokens. These form their own finding class (§9.1), not just an ingest concern.
 3. **Streaming reassembly.** Collapse SSE chunk logs into one record with final usage. When the terminal usage event is missing, estimate tokens from reassembled content (Tier A) or from chunk counts (Tier B/C) and mark the record `usage_estimated=true`, which propagates a confidence penalty to any finding relying on it.
 4. **Multimodal and non-chat endpoints.** Image/audio/video token accounting per provider formula, plus embeddings, rerank, and legacy completions — each with its own pricing unit. Unknown endpoints are counted in baseline spend but excluded from analyzers, and reported in the coverage panel.
+
+### 6.6 Connections and the ingest manifest
+
+A **connection** is a named, saved binding of a connector to a location and a source — the thing a user configures once and then audits against repeatedly. It is config, not state, and it holds no secrets (§6.1).
+
+```yaml
+connections:
+  - id: prod-bedrock-s3
+    connector: s3
+    uri: s3://acme-llm-logs/bedrock/invocation-logs/
+    region: us-east-1
+    auth: { profile: llm-audit-readonly }   # or: role_arn — a reference, never a secret
+    partition: "y=%Y/m=%m/d=%d/"            # prunes listing to the audit window
+    format: auto                            # jsonl | json | csv | parquet |
+    compression: auto                       #   cloudwatch_export | azure_monitor | auto
+    source: bedrock
+
+  - id: foundry-diagnostics
+    connector: az
+    uri: az://insights-logs-requestresponse/
+    account: acmellmlogs
+    auth: { credential: default }           # DefaultAzureCredential chain
+    partition: "y=%Y/m=%m/d=%d/h=%H/"
+    source: foundry
+
+  - id: local-export
+    connector: file
+    uri: ./logs/anthropic/*.jsonl.gz
+    source: anthropic
+```
+
+**The ingest manifest.** Every run records the exact objects it consumed — uri, etag, size, byte count read, records parsed, records rejected — in its run record (§5.3). This is what makes a platform's repeat runs behave:
+
+- **Incremental re-ingest.** An object already ingested at the same `(uri, etag, size)` is skipped. A weekly re-audit reads the new week, not the year, and the run states how many objects were reused versus read.
+- **Mutable objects are handled explicitly.** A still-being-appended `today.jsonl` whose etag changed is re-read in full, and its overlapping records are collapsed by request id (§6.5.1). The manifest records that this happened, because "the same request appeared in two objects" is otherwise indistinguishable from a genuine retry — and that distinction is the difference between a real finding and a double-counted one.
+- **Double counting is detectable, not accidental.** Two connections whose prefixes overlap, or an export re-uploaded under a new key, show up as the same request ids arriving from different objects. That is reported as an ingest warning naming both objects, rather than quietly inflating baseline spend.
+- **A run is reproducible.** The manifest names exactly what was read, so a disputed number can be traced back to the objects that produced it — the first question anyone asks when a savings figure looks wrong.
 
 ---
 
@@ -611,7 +715,8 @@ The tool runs on user infrastructure and may see prompt content. Becoming a serv
 - **There is no authentication in v1, and that is a deliberate scope decision, not an oversight.** A single-tenant local server with no accounts has nothing to authenticate; adding a homegrown login would create the illusion of a security boundary without the substance of one. Teams deploying it beyond one machine put it behind whatever they already use — an SSO reverse proxy, a VPN, an SSH tunnel. The docs say this plainly rather than shipping a password field.
 - **The app makes no outbound calls of its own** — no CDN assets, no telemetry, no update check. Every asset is served from the package, which is also why the CSP can forbid external origins outright. The only outbound calls in the entire system remain the opt-in replay calls of §10.3.
 - **Uploaded logs are treated as ingest input, not as stored files.** They pass through the same redaction and fingerprinting pipeline (layers 1–2) and the upload is discarded; the run keeps derived records only.
-- **The API is CSRF-protected and path-confined.** State-changing endpoints require a same-origin token, and any server-side path the UI accepts (log locations, output directories) is resolved and confined to configured roots — a browser-reachable process that reads arbitrary filesystem paths is a file-disclosure bug regardless of who is on the other end.
+- **The API is CSRF-protected and path-confined.** State-changing endpoints require a same-origin token, and any server-side path the UI accepts (log locations, output directories) is resolved and confined to configured roots — a browser-reachable process that reads arbitrary filesystem paths is a file-disclosure bug regardless of who is on the other end. The same confinement governs remote reads: runs name a **configured connection**, never an arbitrary URI (§6.1).
+- **The app stores no credentials.** Cloud connectors resolve identity from the host's own credential chain — instance profile, managed identity, or a named local profile — so the app holds a reference, not a secret, and has no secret input field to type one into. An unauthenticated server that also holds cloud keys is a much worse thing to leave running than one that does not.
 
 The four content layers are unchanged:
 
@@ -641,10 +746,11 @@ Starts the local server and prints the URL. Single tenant, no accounts (§12).
 | Page | Contents |
 |---|---|
 | **Runs** | Every run in the store: status, window, source, baseline spend, portfolio savings, timestamp. Start a new run from here. |
-| **New run** | Point at log paths or upload files, pick source and window, attach `workloads.yaml` / `architecture.yaml` / commercial terms if any, pre-flight validation, submit. |
+| **Connections** | The saved log sources (§6.6): add or edit a connection, **test** it (credentials resolve, prefix lists, permissions exercised are named), and **preview** — the first N records decoded, with the detected format, provider, fidelity tier, and observed time range, before committing to a full run. No secret fields; credentials resolve from the host's own chain. |
+| **New run** | Pick a connection (or upload files, or point at a local path within the configured roots), set the window, attach `workloads.yaml` / `architecture.yaml` / commercial terms if any, pre-flight validation — including an object count and byte estimate for the window, so a run nobody meant to start is visible before it starts — then submit. |
 | **Run overview** | The executive section (§3) for one run: baseline spend decomposed by workload, model, token class and status; waste percentage; portfolio total with the "sum of marginals" statement next to it; totals broken out per confidence tier. |
 | **Findings** | Sortable, filterable table — by analyzer, workload, confidence tier, risk, effort, realizability. Each row expands into the engineering detail: evidence, the exact change, verification steps, and both standalone and marginal savings. |
-| **Coverage** | What was skipped and why (§11.4): unpriced models, blocked analyzers and their instrumentation findings, fidelity tier per source, price-catalog staleness, cluster-quality warnings, whether the monthly projection was withheld. |
+| **Coverage** | What was skipped and why (§11.4): objects that failed to read and their byte volume (§6.1), unpriced models, blocked analyzers and their instrumentation findings, fidelity tier per source, price-catalog staleness, cluster-quality warnings, whether the monthly projection was withheld. |
 | **Workloads** | Discovered clusters with their four profile axes (§8.3), which findings each produced, and which are withheld pending a declared blast radius — with the withheld dollar ceiling shown, so editing config has visible value. |
 | **Run detail** | Live progress while running (stage, records processed, elapsed), the structured log, and the downloadable artifacts. |
 
@@ -671,6 +777,10 @@ GET    /api/runs/{id}/report      report.html
 POST   /api/runs/{id}/cancel      cancel a queued or running run
 GET    /api/runs/{id}/diff/{base} realized vs projected against a baseline run (§13.6)
 POST   /api/config/validate       validate workloads/architecture/commercial config without running
+
+GET    /api/connections           list saved connections (§6.6)
+POST   /api/connections/{id}/test resolve credentials, list the prefix, report permissions exercised
+POST   /api/connections/{id}/peek decode the first N objects: detected format, source, fidelity, time range
 ```
 
 It is deliberately thin: the API exposes runs and their artifacts, not analyzer internals. The HTML pages are server-rendered rather than built on top of this API (§5.1) — the API exists for programmatic callers, so it does not have to grow an endpoint for every UI affordance.
@@ -678,7 +788,13 @@ It is deliberately thin: the API exposes runs and their artifacts, not analyzer 
 ### 13.3 CLI
 
 ```
-llm-cost-auditor ingest   <paths...> --source anthropic|openai|bedrock|vertex|foundry [--fidelity auto]
+llm-cost-auditor ingest   <uri...|connection-id> --source anthropic|openai|bedrock|vertex|foundry
+                          # uri: ./logs/*.jsonl | file:///path | s3://bucket/prefix/ | az://container/prefix/
+                          [--fidelity auto] [--format auto] [--compression auto]
+                          [--window 2026-08-01..2026-08-31]   # prunes the object listing (§6.1)
+                          [--profile <aws-profile> | --role-arn <arn>] [--account <azure-account>]
+                          [--full]                            # ignore the manifest, re-read everything (§6.6)
+llm-cost-auditor connections [list | test <id> | peek <id> [-n 100]]
 llm-cost-auditor profile  [--emit-config workloads.yaml] [--emit-architecture architecture.yaml]
 llm-cost-auditor audit    [--config workloads.yaml] [--architecture architecture.yaml]
                           [--window 2026-08-01..2026-08-31]
@@ -752,7 +868,9 @@ No external oracle exists for "you would have saved $X", so correctness is estab
 5. **Committed spend can make every finding worth $0.** Mitigation: realizable-vs-gross reported separately, always.
 6. **A UI makes numbers look more certain than they are.** A dollar figure in a styled dashboard reads as fact in a way the same figure in a terminal does not, and confidence tiers are exactly what users skim past. Mitigation: the tier and the low–high range are part of every savings figure's presentation, not a column users can hide; the portfolio total never appears without the "sum of marginals" statement next to it; withheld projections show the warning in place of the number rather than omitting the panel.
 7. **Two surfaces can drift into two truths.** Mitigation: the app and the exported report render the same run record through the same template layer, and a figure computed in a view rather than by the engine is treated as a defect (§13.1).
-8. **A long-lived server process contradicts the in-memory design.** A run holds a whole dataset in memory; a server that accepts concurrent runs will be OOM-killed on the laptop this is meant to run on. Mitigation: concurrency 1 by default (§5.4), and the run store — not process memory — is what outlives a run.
+8. **The tool inherits whatever permissions its host has.** Reading logs from S3 or Azure Blob means running somewhere with credentials, next to an unauthenticated local server. Mitigation: credentials are never stored by the app (§12), only configured connections are readable (§6.1), read-only permissions are what the docs ask for, and the connection test names the permissions it actually exercised so over-broad grants are visible.
+9. **Incomplete log delivery looks exactly like less traffic.** Object storage is where logs go to be silently incomplete — a delivery lag, a lifecycle rule that expired last month's keys, a prefix nobody granted access to. The tool cannot tell "no requests" from "no logs". Mitigation: read failures are coverage failures with named objects and byte volumes, gaps in the observed timeline are reported against the requested window, and projections are gated on both — but a clean-looking run over quietly truncated data remains the residual risk, which is why the manifest names every object read.
+10. **A long-lived server process contradicts the in-memory design.** A run holds a whole dataset in memory; a server that accepts concurrent runs will be OOM-killed on the laptop this is meant to run on. Mitigation: concurrency 1 by default (§5.4), and the run store — not process memory — is what outlives a run.
 
 ---
 
@@ -764,4 +882,6 @@ No external oracle exists for "you would have saved $X", so correctness is estab
 - Licensing and distribution model for the price catalog updates.
 - Does the app ever need to write config back to the user's repo, or only offer generated config for download? Writing files a browser session chose the contents of is a meaningfully larger trust ask.
 - Is a packaged container image part of the v1 deliverable, or is `pip install` + `serve` enough for the first users?
+- Do the cloud log **query** APIs (CloudWatch Logs, Log Analytics, Cloud Logging) ever need to be connectors, or is "export to a bucket" always available in practice? The bet in §6.1 is that it is; the first user who cannot export settles it.
+- Gateway logs (LiteLLM, OpenRouter, Helicone) are a post-v1 *source* adapter, but several of them expose a database or an API rather than files. Does that make them a source, a connector, or both?
 - The shared-deployment case (a team pointing one instance at a shared log export) is out of scope for v1 but keeps being asked for. What is the smallest thing that would make it defensible — a reverse-proxy deployment guide, or actual identity in the product?

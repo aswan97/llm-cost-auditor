@@ -15,6 +15,13 @@ the merge if it is unchanged or undocumented here.
   engine, with runs as durable artifacts in a filesystem run store. SPEC.md §1, §3, §4,
   §5.3–5.4, §12, §13 rewritten accordingly; §13 subsections renumbered.
 
+- **Design: log sources are pluggable connectors.** Ingest is split into a connector
+  (where the bytes are — local files, S3, Azure Blob) and a source adapter (what they
+  mean), with a shared decode layer for compression and container formats, saved
+  connections that hold no credentials, and an ingest manifest making re-audits
+  incremental and double counting detectable. SPEC.md §6.1 and §6.6 added; §6.2–6.5
+  renumbered.
+
 ### Added
 - Branching model (`develop` / `feature/*` / `hotfix/*`) and release process — see CONTRIBUTING.md.
 - CI: ruff lint and format, strict mypy, pytest with coverage, and a price-literal guard.
