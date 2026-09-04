@@ -33,7 +33,11 @@ Two independent axes — where the logs live, and what they mean — so any comb
 
 **Where** (connectors): local files and globs, **Amazon S3** (`s3://`, including S3-compatible endpoints), **Azure Blob Storage** (`az://`). Google Cloud Storage follows in v1.1. Compression and container format — gzip/zstd, JSONL, JSON, CSV, Parquet, CloudWatch export envelopes, Azure Monitor diagnostic blobs — are detected and reported, never assumed silently.
 
-Connections are saved by name and config files hold **no secret material** — only a reference. Credentials resolve from the host's own chain (instance profile, managed identity, named profile) where one exists, and otherwise come from the built-in credential store: each secret sealed individually with XChaCha20-Poly1305 under its own derived key, the root key held in your OS keyring or derived from a passphrase with Argon2id (libsodium throughout — no cryptography is implemented here). The store is write-only — there is no API, command, or page that reads a secret back — short-lived kinds (assumed roles, container SAS tokens) are preferred over long-lived keys, and every use is recorded in the run. Storing credentials makes authentication mandatory for any non-loopback bind: `serve` refuses to start without an access token rather than warning about it. Objects are streamed rather than downloaded, the audit window prunes the listing, and every object read is recorded so re-audits are incremental and double counting is detectable. An object that cannot be read is a *coverage failure* naming the gap — never silently less data.
+Connections are saved by name and config files hold **no secret material** — only a reference. Every read is confined to a **source scope** — the permitted roots, buckets, and containers — which is configured at the terminal and cannot be widened through the API or the UI, so connections stay editable in the app without the app becoming a way to read arbitrary storage.
+
+Credentials resolve from the host's own chain (instance profile, managed identity, named profile) where one exists, and otherwise come from the built-in credential store: each secret sealed individually with XChaCha20-Poly1305 under its own derived key, the root key held in your OS keyring or derived from a passphrase with Argon2id (libsodium throughout — no cryptography is implemented here). The store is write-only — there is no API, command, or page that reads a secret back — short-lived kinds (assumed roles, container SAS tokens) are preferred over long-lived keys, and every use is recorded in the run. Storing credentials makes authentication mandatory for any non-loopback bind: the server refuses to serve without an access token rather than warning about it, checked both at startup and on every write to the store.
+
+Objects are streamed rather than downloaded, the audit window prunes the listing, and every object read is recorded in the run's manifest, so a disputed figure traces back to the objects that produced it and overlapping sources are caught rather than double counted. An object that cannot be read is a *coverage failure* naming the gap — never silently less data: any unread object makes the baseline an explicit lower bound, and past a threshold the savings figures are withheld rather than published with a footnote.
 
 **What** (source adapters): Anthropic, OpenAI, and cloud brokers (AWS Bedrock, Google Vertex AI, Azure AI Foundry) — each with its own price sheet, log shape, and reserved-capacity handling. Gateway logs (LiteLLM, OpenRouter, Helicone) are planned.
 
@@ -54,15 +58,20 @@ It is single-tenant and binds localhost by default: there are no accounts, becau
 Every operation the app performs is a command first, so audits fit in CI and cron:
 
 ```bash
-llm-cost-auditor ingest  s3://acme-llm-logs/bedrock/ --source bedrock --window 2026-08-01..2026-08-31
-llm-cost-auditor ingest  ./logs/*.jsonl --source anthropic
-llm-cost-auditor profile --emit-config workloads.yaml --emit-architecture architecture.yaml
-llm-cost-auditor audit   --config workloads.yaml --architecture architecture.yaml \
-                         --out report.html --json findings.json --snapshot snapshot.json
+# one run, start to finish, over one or more saved connections:
+llm-cost-auditor run     prod-bedrock-s3 local-anthropic --window 2026-08-01..2026-08-31 \
+                         --config workloads.yaml --out report.html --json findings.json
+
+# or stage by stage against the same run, when you want to inspect between steps:
+llm-cost-auditor run     prod-bedrock-s3 --window 2026-08-01..2026-08-31 --stop-after ingest
+llm-cost-auditor profile --run <run_id> --emit-config workloads.yaml --emit-architecture architecture.yaml
+llm-cost-auditor audit   --run <run_id> --config workloads.yaml --snapshot snapshot.json
 
 # after acting on the findings:
 llm-cost-auditor verify  --baseline snapshot.json    # realized vs projected
 ```
+
+Stages always name their run explicitly. Nothing infers "the last thing you ingested" — a command that guesses which data it is analyzing is one that silently analyzes the wrong data.
 
 The first run needs no config at all: it discovers workloads, assumes the most conservative risk posture, reports what survives that gating, and writes starter config files — including a draft map of your architecture reverse-engineered from the logs — for you to correct.
 
@@ -82,7 +91,7 @@ Enterprise pricing — negotiated rates, discounts, prepaid credits, volume tier
 
 ## Privacy
 
-Runs entirely on your infrastructure — the web app is a server you start, not a service you send logs to. The app makes no outbound calls of its own: no CDN assets, no telemetry, no update check. Raw prompt content is never persisted — hashing and fingerprinting happen at ingest; redaction runs before anything is stored; evidence excerpts in reports are opt-in; the derived store is encrypted with a retention TTL. Any outbound call is gated per-workload and itemized in the report.
+Runs entirely on your infrastructure — the web app is a server you start, not a service you send logs to. The app makes no outbound calls of its own: no CDN assets, no telemetry, no update check. Raw prompt content is never persisted — hashing and fingerprinting happen at ingest, redaction runs before anything is stored, and evidence excerpts in reports are opt-in — so the derived run store holds no prompt text to encrypt, and stays inspectable, diffable, and deletable with `rm -rf` under a retention TTL. Encryption is scoped to credentials, which is the one thing here that is genuinely secret. Any outbound call is gated per-workload and itemized in the report.
 
 ## Non-goals
 

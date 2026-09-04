@@ -32,6 +32,19 @@ the merge if it is unchanged or undocumented here.
   envelope and `credentials rekey` to re-seal. SPEC.md §6.7 added; §2, §5.1, §6.1, §12,
   §13.1–13.3, §15 updated.
 
+- **Design: pre-implementation spec review (SPEC.md v1.2).** Resolved contradictions and gaps found reviewing
+  the design before the first module. Structural: one run is one directory with three resumable stages and an
+  explicit `--run`, replacing implicit inter-command state (§5.3, §13.3); `Store` split into `RecordStore` and
+  `RunStore` (§5.1); analyzer applicability is per-slice and findings name their slices (§5.2, §13.4); money is
+  integer micro-USD end to end (§6.4); ingest is bulk in v1 with incremental deferred to v1.1 (§6.6);
+  attribution runs waste first (§11.2); encryption is scoped to credentials only, and the derived store is no
+  longer encrypted (§5.3, §12). Security: reads are confined to a terminal-only source scope so connections stay
+  editable in the app (§6.1, §13.2), the bind interlock is re-checked on every credential write (§6.7), and the
+  loopback and "signed snapshot" claims are corrected to what they actually provide (§12, §13.6). New explicit
+  rules for timezone, currency, unknown cache TTL class, retry-vs-duplicate-delivery classification, baseline
+  coverage gating, the Tier A/B cache stage split, price-increase exposure (§11.5), upload staging with a 25 MB
+  limit, and exact-vs-declared-bound testing (§14). AGENTS.md gains the integer-money rule.
+
 ### Added
 - Branching model (`develop` / `feature/*` / `hotfix/*`) and release process — see CONTRIBUTING.md.
 - CI: ruff lint and format, strict mypy, pytest with coverage, and a price-literal guard.

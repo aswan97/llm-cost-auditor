@@ -11,7 +11,7 @@ SPEC.md describes the finished system. It is not a build order, and building it 
 Concretely, for this project:
 
 - **v1 is cache + waste findings only** (SPEC §4). Batching and routing are specified so the foundations fit them later — not so they get stubbed now. No empty `routing/` package, no placeholder replay harness.
-- **Seams, not implementations.** The `Store` seam exists so DuckDB can replace in-memory later; write the seam, keep polars in memory, don't write the DuckDB backend. Same for the Rust-portable hot paths — keep the interfaces narrow and pure, but they stay Python until profiling says otherwise.
+- **Seams, not implementations.** The `RecordStore` seam exists so DuckDB can replace in-memory later; write the seam, keep polars in memory, don't write the DuckDB backend. `RunStore` is a separate seam over a filesystem directory and stays one (SPEC §5.1) — don't merge them back into a single `Store` because they both say "store". Same for the Rust-portable hot paths: keep the interfaces narrow and pure, but they stay Python until profiling says otherwise.
 - **The plugin analyzer interface earns its keep at three analyzers, not one.** Write the first analyzer as a plain module against the protocol; extract the registry when the second and third exist and the shape is known.
 - **Prefer a function to a class, a dict to a model, and a module to a package** until something forces the upgrade. The exceptions are the data contracts — `RequestRecord`, `Finding`, config, price rows — which are pydantic models from day one because everything else is validated against them.
 - **Two provider adapters before generalizing adapters.** The abstraction that fits Anthropic alone will be wrong for Bedrock.
@@ -89,7 +89,21 @@ mult = pricing.multiplier(provider, model, "cache_read", at=ts)  # not: 0.1
 
 Prices load lazily and are memoized per `(provider, model, timestamp)` — never eager-load the catalog at import or CLI startup.
 
+**The one exception is the user's own commercial overlay** (SPEC §7.2) — negotiated rates, discounts, and commitments are the user's contract expressed as data, so they are literals in *their* config file by necessity. That does not relax anything on our side: the overlay is read exclusively through `pricing.rate()` / `pricing.multiplier()`, and no analyzer, template, or test ever reads an overlay field directly.
+
 This rule is enforced in CI by `scripts/check_price_literals.py`, which fails the build on a numeric literal bound to a price-shaped name outside the pricing module. If something genuinely is not a price, append `# noqa: price-literal` with a justification rather than renaming around the check.
+
+### Money is an integer, never a float
+
+Every monetary quantity is an **integer count of micro-USD** (`int`, millionths of a dollar), from the price catalog through attribution to the JSON on the wire (SPEC §6.4). A binary float never touches a dollar figure at any point in the system.
+
+- `Decimal` is the **parsing** type — catalog rates are decimal strings, parsed once and converted to μUSD at the boundary. μUSD is the **arithmetic** type. Don't carry `Decimal` through the pipeline "to be safe": mixing the two is how a rounding difference appears in one code path and not another.
+- **Parquet and polars columns are integer**, explicitly typed. polars will infer `f64` for a money column if nobody says otherwise, and that inference is silent.
+- **JSON fields are integers named `_usd_micros`.** JSON has no decimal type, so a field written as `1420.50` is a float on the way back in — which quietly defeats the exact-equality rule below on any round-trip.
+- **Format to dollars once, in the presentation layer, and never read it back.**
+- Where rounding is unavoidable (a percentage discount, not a rate × token count), round half-even at the point of application and keep it in one function.
+
+**Why:** the property test that marginal attributions sum *exactly* to the portfolio total is only achievable in integers, and it is the invariant that catches attribution bugs. In floats it becomes an approximate comparison, which is the same as no test at all.
 
 ### Test against hand-computed fixtures, and assert exact equality
 
@@ -104,6 +118,8 @@ Keep the set small enough that a human can verify each expected value by inspect
 - **A price-boundary request** — timestamped either side of an `effective_from` date, asserting each is priced at the rate in force at its own timestamp.
 - **A multimodal request** — image/audio tokens under the provider's own accounting formula.
 
-Fixtures declare their own pricing catalog (a test catalog, never the bundled one) so expected values stay stable when real prices change. Because equality is exact, money is computed in `Decimal` or integer micro-units end to end — never binary floats.
+Fixtures declare their own pricing catalog (a test catalog, never the bundled one) so expected values stay stable when real prices change. Exact equality is what makes the integer-μUSD rule above load-bearing rather than stylistic.
 
 These fixtures complement, and do not replace, the generated synthetic corpus with planted inefficiencies described in SPEC.md §14.
+
+**The one place a bound is permitted** is recovering *planted savings* from generated traffic, where a simulator's reconstruction is genuinely inexact (SPEC §14). Even there: the bound is declared per case, next to the expected value, with a one-line justification for why that case cannot be exact. There is no shared global tolerance — a single slack number is how an off-by-one in one analyzer hides inside another's margin. A case whose arithmetic *is* deterministic gets exact equality even in that suite, and a bound where equality was achievable is a defect in the test, not a safety margin.
