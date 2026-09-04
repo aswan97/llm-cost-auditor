@@ -22,6 +22,13 @@ the merge if it is unchanged or undocumented here.
   incremental and double counting detectable. SPEC.md §6.1 and §6.6 added; §6.2–6.5
   renumbered.
 
+- **Design: credential store for cloud connectors.** Connections may reference secrets held
+  in the OS keyring or a passphrase-sealed file: write-only (no read path anywhere),
+  short-lived kinds preferred, use audited per run, and never serialized into run records,
+  logs, or config. A non-empty store plus a non-loopback bind now makes an access token
+  mandatory — `serve` refuses to start without one. SPEC.md §6.7 added; §2, §6.1, §12,
+  §13.1–13.3, §15 updated.
+
 ### Added
 - Branching model (`develop` / `feature/*` / `hotfix/*`) and release process — see CONTRIBUTING.md.
 - CI: ruff lint and format, strict mypy, pytest with coverage, and a price-literal guard.

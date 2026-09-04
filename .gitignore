@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# llm-cost-auditor workspace: run store and the sealed credential file (SPEC.md §5.3, §6.7).
+# Never commit either — runs hold derived request data, and the credential file holds secrets.
+.llm-cost-auditor/

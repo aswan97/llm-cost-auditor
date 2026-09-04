@@ -45,6 +45,19 @@ All work happens on `feature/*`, `fix/*`, `docs/*`, or `chore/*` branched from `
 
 Before starting work: `git checkout develop && git pull && git checkout -b feature/<slug>`. Rebase on `develop` rather than merging it in.
 
+### A stored secret has exactly one exit
+
+The credential store (SPEC §6.7) hands a secret to the connector that needs it and to nothing else. There is no read API, no CLI command that prints one, no template that renders one, no debug flag that logs one, and no test fixture that round-trips a real value. Treat every one of those as a defect, not a convenience.
+
+Concretely:
+
+- Credential objects mask their `__str__` and `__repr__`, so a secret cannot reach a log line, an exception message, or a traceback by accident.
+- Nothing about a secret is written to `run.json`, `manifest.json`, `log.jsonl`, an event stream, a report, or a config file — those carry the `secret_ref` only.
+- Secrets are read from stdin or a prompt, never from argv, and never from a query string.
+- **Every change here needs a test that asserts the absence**, because absence is invisible in review: serialize a run record and a config with a credential attached and assert the value appears nowhere in the output; format the credential object and assert it is masked; call the API surface and assert no route returns it.
+
+Adding a "just for debugging" print of a resolved credential is the kind of change that gets shipped and then found by someone else, so it does not get written in the first place.
+
 ### Never write a price as a literal
 
 No monetary rate, cost multiplier, or discount factor may appear as a literal anywhere outside the price table (§7.1). This includes:

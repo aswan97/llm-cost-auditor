@@ -2,7 +2,7 @@
 
 **Status:** Draft v1.1 · **Date:** 2026-09-04 · **Repo:** `llm-cost-auditor`
 
-*Changed in v1.1: the auditor is a self-hosted platform (local web app + CLI over one run engine), not an offline CLI — §1, §3, §4, §5.3–5.4, §12, §13. Log sources are pluggable connectors (local files, S3, Azure Blob) separate from source adapters — §6.1, §6.6.*
+*Changed in v1.1: the auditor is a self-hosted platform (local web app + CLI over one run engine), not an offline CLI — §1, §3, §4, §5.3–5.4, §12, §13. Log sources are pluggable connectors (local files, S3, Azure Blob) separate from source adapters, with a credential store behind them — §6.1, §6.6, §6.7.*
 
 ---
 
@@ -34,7 +34,7 @@ Four properties define the product:
 
 - **Self-hosted / GPU cost modeling.** No open-weights TCO, GPU-hour math, or vLLM/deployment economics. Provider-API spend only.
 - **Live enforcement.** The tool never routes, caches, batches, or proxies real traffic. It recommends; humans implement.
-- **Multi-tenancy, accounts, and a hosted service.** The platform is single-tenant and runs where the user puts it. No sign-up, no org/user management, no tenant isolation, no billing. Authentication is a deployment concern, not a product feature (§13.1).
+- **Multi-tenancy, accounts, and a hosted service.** The platform is single-tenant and runs where the user puts it. No sign-up, no org/user management, no tenant isolation, no billing. There is exactly one authentication mechanism — a single shared access token, required only when the server both holds credentials and binds beyond loopback (§6.7) — and it gates the port rather than identifying anyone.
 - **Collaboration features.** No comments, assignments, notifications, or finding-triage workflow in v1. Findings are exported (`findings.json`, report HTML) into whatever tracker the team already uses.
 
 ### Deferred, not excluded (roadmap)
@@ -79,7 +79,7 @@ The data model, pricing engine, workload profiler, confidence framework, and att
 
 | Release | Surface |
 |---|---|
-| **v1** | CLI over the run engine; run store on disk (§5.3); connectors for local files, S3, and Azure Blob (§6.1); web app covering the core loop — connect a log source, run, browse findings, view coverage, download the report |
+| **v1** | CLI over the run engine; run store on disk (§5.3); connectors for local files, S3, and Azure Blob (§6.1) with the credential store (§6.7); web app covering the core loop — connect a log source, run, browse findings, view coverage, download the report |
 | **v1.1** | GCS connector; in-app config editing with validation and re-run; run comparison (`verify` diff) in the UI |
 | **v1.2** | Replay budget approval flow in the app (a dry-run estimate the user confirms before any outbound call, §10.3) |
 
@@ -138,6 +138,7 @@ local files · S3 · Azure Blob
 ### 5.1 Stack
 
 - **Python 3.12+**, `polars` (in-memory frames), `pydantic` v2 (models/config), `typer` (CLI), `jinja2` (report), `datasketch`-style MinHash/LSH (vendored or dependency), provider tokenizers behind an optional extra.
+- **Credential storage delegates to the platform**: `keyring` for the OS-native backend, and a vetted AEAD + memory-hard KDF implementation for the sealed-file fallback (§6.7). No cryptographic primitive is implemented here.
 - **Cloud SDKs are optional extras, one per connector** (`boto3` for `s3`, `azure-storage-blob` + `azure-identity` for `az`). A local-files audit must not pull two clouds' SDKs, and a missing extra produces "install `llm-cost-auditor[s3]`", not an import error.
 - **Web app: `fastapi` + `uvicorn`, server-rendered `jinja2`, HTMX for interactivity.** No JavaScript build step, no second language, no SPA. The same template layer renders both the app's pages and the exported static report, so the two cannot drift. HTMX covers the interactions v1 actually needs — polling a running job, filtering and sorting a findings table, expanding evidence, submitting config — and a page that genuinely outgrows it is the signal to reconsider, not a reason to start with React. Charts are server-rendered inline SVG for the same reason.
 - **In-memory processing** targeting up to ~500k requests per run on a laptop. Storage is behind a `Store` seam (`load()`, `iter_records()`, `persist_derived()`) so it can be swapped for DuckDB/Parquet without touching analyzers.
@@ -242,7 +243,7 @@ class Connector(Protocol):
 
 - **Stream, never download-and-parse.** Objects are read as bounded-buffer streams and decompressed on the fly, with a small prefetch pool so network latency overlaps parsing. A day of logs is routinely larger than RAM, and the in-memory budget (§5.1) is for normalized records, not raw bytes.
 - **Prune the listing with the window, not the parser.** Connections declare a partition template (`y=%Y/m=%m/d=%d/`); an audit window is expanded into the key prefixes it can possibly touch, so a one-week audit against three years of logs lists a week of keys. Where no template applies, `last_modified` filters the listing, and records outside the window are still dropped after decode — log files do not align with audit windows. The report states the requested window and the observed one.
-- **Credentials are referenced, never stored.** Each connector uses its cloud's own default credential chain — environment, instance profile / IRSA / managed identity, or a named local profile. A connection stores a *reference* (profile name, role ARN to assume, account and container), and **the UI has no secret field at all**. This is a direct consequence of §12: the server is unauthenticated by design, so it must not become a place where secrets live. Read-only permissions are what the docs ask for, and the connection test says which permissions were actually exercised.
+- **Ambient credentials by default; stored credentials when the user has none.** A connection resolves identity through its cloud's own default chain — environment, instance profile / IRSA / managed identity, or a named local profile — and stores only a *reference* (profile name, role ARN, account and container). That remains the recommended posture, because a credential the tool never holds cannot leak from it. But an analyst on a laptop auditing a bucket in an account they do not run has no ambient identity to borrow, and telling them to configure the AWS CLI first is telling them to go away. So credentials **can** be stored, encrypted, opt-in, under the rules in §6.7 — never as a plain field in a config file. Read-only permissions are what the docs ask for, and the connection test names the permissions it actually exercised.
 - **Only configured connections are readable.** A run names a connection; it cannot name an arbitrary URI. Without that rule an unauthenticated local server with an instance profile is a credential-borrowing exfiltration primitive — anything reachable in the browser could ask it to read any bucket the host can reach, and write nothing down. Path confinement for `file://` (§12) is the same rule wearing different clothes.
 - **A partial read is a failure, not less data.** A truncated gzip member, a permission-denied key, a listing that timed out mid-page: each marks the run's coverage incomplete, naming the skipped objects and their byte volume, and gates projections exactly as §11.4 does. Baseline spend computed over 87% of the logs is not a smaller number — it is a wrong one, and the failure mode this whole tool exists to avoid.
 - **Every object consumed is recorded** (§6.6), so re-ingest is incremental and double-counting is detectable rather than accidental.
@@ -310,7 +311,7 @@ Each of these silently corrupts cost math if ignored.
 
 ### 6.6 Connections and the ingest manifest
 
-A **connection** is a named, saved binding of a connector to a location and a source — the thing a user configures once and then audits against repeatedly. It is config, not state, and it holds no secrets (§6.1).
+A **connection** is a named, saved binding of a connector to a location and a source — the thing a user configures once and then audits against repeatedly. It is config, not state, and it holds no secret material — only an ambient-identity reference or a `secret_ref` into the credential store (§6.7).
 
 ```yaml
 connections:
@@ -318,7 +319,7 @@ connections:
     connector: s3
     uri: s3://acme-llm-logs/bedrock/invocation-logs/
     region: us-east-1
-    auth: { profile: llm-audit-readonly }   # or: role_arn — a reference, never a secret
+    auth: { profile: llm-audit-readonly }   # ambient chain; or a secret_ref into the store (§6.7)
     partition: "y=%Y/m=%m/d=%d/"            # prunes listing to the audit window
     format: auto                            # jsonl | json | csv | parquet |
     compression: auto                       #   cloudwatch_export | azure_monitor | auto
@@ -344,6 +345,70 @@ connections:
 - **Mutable objects are handled explicitly.** A still-being-appended `today.jsonl` whose etag changed is re-read in full, and its overlapping records are collapsed by request id (§6.5.1). The manifest records that this happened, because "the same request appeared in two objects" is otherwise indistinguishable from a genuine retry — and that distinction is the difference between a real finding and a double-counted one.
 - **Double counting is detectable, not accidental.** Two connections whose prefixes overlap, or an export re-uploaded under a new key, show up as the same request ids arriving from different objects. That is reported as an ingest warning naming both objects, rather than quietly inflating baseline spend.
 - **A run is reproducible.** The manifest names exactly what was read, so a disputed number can be traced back to the objects that produced it — the first question anyone asks when a savings figure looks wrong.
+
+### 6.7 Credential storage
+
+Ambient credentials (§6.1) cover the deployed case and none of the common one: an analyst on a laptop, auditing a bucket in an account they do not administer, handed a read-only key by the team that does. So the platform stores credentials for its connectors — with the understanding that holding a cloud key is a different class of responsibility from holding a run, and that this is the one place where getting it wrong costs more than a wrong number.
+
+**Credential kinds, ordered by preference.** Short-lived and narrowly scoped beats long-lived and broad, and the app is opinionated about it — the UI presents them in this order and marks the last of each group as discouraged.
+
+| Connector | Kind | Notes |
+|---|---|---|
+| **s3** | `aws_role` | Role ARN (+ optional external id), assumed via ambient or another stored credential. Session credentials live in memory only and refresh on expiry. **Preferred.** |
+| | `aws_access_key` | Access key id + secret (+ optional session token). Long-lived; stored with a created-at date and flagged once it ages past a configurable threshold. |
+| **az** | `azure_sas` | Container-scoped SAS token — read-only and expiring by construction. **Preferred**, and the app warns as the expiry approaches rather than failing a run at 3am. |
+| | `azure_client_secret` | Service principal: tenant id, client id, secret. Scoped by RBAC role assignment. |
+| | `azure_storage_key` | Account key. Full control of the whole account; accepted, discouraged in the UI, and never the default. |
+
+**Two backends, no invented cryptography.**
+
+1. **OS keyring (default)** — macOS Keychain, Windows Credential Manager, Linux Secret Service. The operating system owns the key material and its unlock policy; the app stores nothing itself. Keyring entries are namespaced by workspace path so two workspaces cannot collide.
+2. **Encrypted file (headless and container fallback)** — a sealed file in the workspace, AEAD-encrypted under a key derived from a passphrase with a memory-hard KDF, mode `0600`. The passphrase comes from the environment or an interactive prompt **at `serve` startup**, never from the browser. That asymmetry is deliberate: the person at the terminal unlocks the store; a browser session can add a credential to an unlocked store but can never unlock one.
+
+**Write-only, from every direction.** The store accepts secrets and does not return them. There is no API endpoint, CLI command, template, or log line that emits a stored secret value — only metadata (kind, last four characters, created, last used, expiry). Retrieval happens in-process, when a connector asks for it, and nowhere else. An unauthenticated local server that can be asked to read back its own secrets turns any stray browser tab or local process into an exfiltration path.
+
+**The bind interlock.** §12 says the server ships without authentication because a single-tenant local server has nothing to authenticate. A credential store changes that fact, so the rule changes with it:
+
+> If the credential store is non-empty **and** `--host` is anything other than loopback, `serve` **refuses to start** without a configured access token.
+
+Refuses, not warns — a warning printed at startup is not a control, and "I'll fix it later" is how a bucket key ends up on a shared network. Loopback binds are unaffected; there the OS user boundary is the boundary. This is the smallest honest amount of authentication: a single shared token compared in constant time, held in an HttpOnly, SameSite cookie. It is not an identity system, and §2 still holds — there are no accounts.
+
+**Secrets never leave the process.**
+
+- Connectors receive a credential object whose string and repr forms are masked, so a secret cannot reach a log or a traceback by accident.
+- Nothing is written to `run.json`, `manifest.json`, `log.jsonl`, an event stream, or a report — the run record names the `secret_ref`, never the value.
+- Credentials are **not part of the workspace**: copying a run store to a colleague, or committing one, never carries secrets with it. The keyring backend is outside it entirely, and the file backend is excluded from every export path.
+- Secrets are read from stdin or an interactive prompt, never from command-line arguments, which are readable by every process on the machine.
+
+**Lifecycle and accountability.**
+
+- **Rotate in place.** A new value under the same `secret_ref` — connections keep working, no config edit, and the previous value is overwritten rather than versioned.
+- **Delete is immediate and complete**, and names the connections that will break.
+- **Expiry is tracked** where the kind has one (SAS tokens, assumed-role sessions), surfaced on the Connections page, and warned about before it bites.
+- **Use is audited.** Every resolution emits a `credential_used` event into the run record naming the ref, the connection, and the operation — so "what did this server do with my key" has an answer that does not require trusting anyone's memory.
+- **Idle re-lock.** The file backend re-seals after a configurable idle period; a queued run that then needs a credential fails with `credential_locked` and is resumable once the operator unlocks it, rather than half-reading a dataset.
+
+**Config shape** — the file references, the store holds:
+
+```yaml
+connections:
+  - id: prod-bedrock-s3
+    connector: s3
+    uri: s3://acme-llm-logs/bedrock/
+    region: us-east-1
+    auth:
+      secret_ref: acme-audit-readonly      # resolved from the credential store
+      role_arn: arn:aws:iam::123456789012:role/llm-audit-readonly
+
+  - id: foundry-diagnostics
+    connector: az
+    uri: az://insights-logs-requestresponse/
+    account: acmellmlogs
+    auth:
+      secret_ref: acme-foundry-sas         # kind: azure_sas, expires 2026-12-31
+```
+
+A config file remains safe to commit: it contains references and no secret material, which is the property that makes the whole arrangement workable in a repo.
 
 ---
 
@@ -716,7 +781,8 @@ The tool runs on user infrastructure and may see prompt content. Becoming a serv
 - **The app makes no outbound calls of its own** — no CDN assets, no telemetry, no update check. Every asset is served from the package, which is also why the CSP can forbid external origins outright. The only outbound calls in the entire system remain the opt-in replay calls of §10.3.
 - **Uploaded logs are treated as ingest input, not as stored files.** They pass through the same redaction and fingerprinting pipeline (layers 1–2) and the upload is discarded; the run keeps derived records only.
 - **The API is CSRF-protected and path-confined.** State-changing endpoints require a same-origin token, and any server-side path the UI accepts (log locations, output directories) is resolved and confined to configured roots — a browser-reachable process that reads arbitrary filesystem paths is a file-disclosure bug regardless of who is on the other end. The same confinement governs remote reads: runs name a **configured connection**, never an arbitrary URI (§6.1).
-- **The app stores no credentials.** Cloud connectors resolve identity from the host's own credential chain — instance profile, managed identity, or a named local profile — so the app holds a reference, not a secret, and has no secret input field to type one into. An unauthenticated server that also holds cloud keys is a much worse thing to leave running than one that does not.
+- **Credentials, when stored, are encrypted and write-only** (§6.7). Ambient identity — instance profile, managed identity, named profile — remains the default and the recommendation. Where a user has no ambient identity to borrow, the credential store holds the secret in the OS keyring or a passphrase-sealed file, returns it to nobody, and never writes it into a run record, log, event stream, or report.
+- **Holding credentials is what makes authentication necessary.** A non-empty credential store plus a non-loopback bind makes `serve` refuse to start without an access token (§6.7). The no-accounts stance (§2) is intact — this is one shared token gating the port, not an identity system — but "unauthenticated" and "holds cloud keys on a shared interface" is a combination the tool will not let a user assemble by accident.
 
 The four content layers are unchanged:
 
@@ -746,7 +812,8 @@ Starts the local server and prints the URL. Single tenant, no accounts (§12).
 | Page | Contents |
 |---|---|
 | **Runs** | Every run in the store: status, window, source, baseline spend, portfolio savings, timestamp. Start a new run from here. |
-| **Connections** | The saved log sources (§6.6): add or edit a connection, **test** it (credentials resolve, prefix lists, permissions exercised are named), and **preview** — the first N records decoded, with the detected format, provider, fidelity tier, and observed time range, before committing to a full run. No secret fields; credentials resolve from the host's own chain. |
+| **Connections** | The saved log sources (§6.6): add or edit a connection, **test** it (credentials resolve, prefix lists, permissions exercised are named), and **preview** — the first N records decoded, with the detected format, provider, fidelity tier, and observed time range, before committing to a full run. |
+| **Credentials** | The credential store (§6.7): add, rotate, and delete secrets by reference, choosing a kind from the preference-ordered list. Entry fields are write-only — a stored secret is shown as kind, last four, created, last used, and expiry, and there is no view that reveals it. Expiring credentials and aged long-lived keys are flagged here, along with which connections depend on each ref. Unavailable while the file backend is locked, with instructions to unlock at the terminal. |
 | **New run** | Pick a connection (or upload files, or point at a local path within the configured roots), set the window, attach `workloads.yaml` / `architecture.yaml` / commercial terms if any, pre-flight validation — including an object count and byte estimate for the window, so a run nobody meant to start is visible before it starts — then submit. |
 | **Run overview** | The executive section (§3) for one run: baseline spend decomposed by workload, model, token class and status; waste percentage; portfolio total with the "sum of marginals" statement next to it; totals broken out per confidence tier. |
 | **Findings** | Sortable, filterable table — by analyzer, workload, confidence tier, risk, effort, realizability. Each row expands into the engineering detail: evidence, the exact change, verification steps, and both standalone and marginal savings. |
@@ -781,7 +848,13 @@ POST   /api/config/validate       validate workloads/architecture/commercial con
 GET    /api/connections           list saved connections (§6.6)
 POST   /api/connections/{id}/test resolve credentials, list the prefix, report permissions exercised
 POST   /api/connections/{id}/peek decode the first N objects: detected format, source, fidelity, time range
+
+GET    /api/credentials           metadata only: ref, kind, last four, created, last used, expiry (§6.7)
+PUT    /api/credentials/{ref}     store or rotate a secret — write-only, no reciprocal GET
+DELETE /api/credentials/{ref}     delete, naming the connections it breaks
 ```
+
+There is deliberately no `GET /api/credentials/{ref}` returning a value, and no query parameter that makes one appear. The store is write-only from every direction (§6.7); a secret leaves the process only as a signed request to the cloud it belongs to.
 
 It is deliberately thin: the API exposes runs and their artifacts, not analyzer internals. The HTML pages are server-rendered rather than built on top of this API (§5.1) — the API exists for programmatic callers, so it does not have to grow an endpoint for every UI affordance.
 
@@ -795,6 +868,11 @@ llm-cost-auditor ingest   <uri...|connection-id> --source anthropic|openai|bedro
                           [--profile <aws-profile> | --role-arn <arn>] [--account <azure-account>]
                           [--full]                            # ignore the manifest, re-read everything (§6.6)
 llm-cost-auditor connections [list | test <id> | peek <id> [-n 100]]
+llm-cost-auditor credentials [list | add <ref> --kind aws_role|aws_access_key|azure_sas|
+                                                    azure_client_secret|azure_storage_key
+                              | rotate <ref> | rm <ref> | test <ref>]
+                          # secret values are read from stdin or an interactive prompt,
+                          # never from argv; `list` prints metadata only (§6.7)
 llm-cost-auditor profile  [--emit-config workloads.yaml] [--emit-architecture architecture.yaml]
 llm-cost-auditor audit    [--config workloads.yaml] [--architecture architecture.yaml]
                           [--window 2026-08-01..2026-08-31]
@@ -806,6 +884,8 @@ llm-cost-auditor verify   --baseline snapshot.json | <run_id>   # realized vs pr
 llm-cost-auditor refresh-prices
 
 llm-cost-auditor serve    [--host 127.0.0.1] [--port 8787] [--workspace ./.llm-cost-auditor]
+                          [--auth-token-file <path>]   # required for a non-loopback bind
+                                                       # when the credential store is non-empty (§6.7)
 llm-cost-auditor runs     [list | show <run_id> | rm <run_id>]   # the run store (§5.3)
 ```
 
@@ -868,7 +948,7 @@ No external oracle exists for "you would have saved $X", so correctness is estab
 5. **Committed spend can make every finding worth $0.** Mitigation: realizable-vs-gross reported separately, always.
 6. **A UI makes numbers look more certain than they are.** A dollar figure in a styled dashboard reads as fact in a way the same figure in a terminal does not, and confidence tiers are exactly what users skim past. Mitigation: the tier and the low–high range are part of every savings figure's presentation, not a column users can hide; the portfolio total never appears without the "sum of marginals" statement next to it; withheld projections show the warning in place of the number rather than omitting the panel.
 7. **Two surfaces can drift into two truths.** Mitigation: the app and the exported report render the same run record through the same template layer, and a figure computed in a view rather than by the engine is treated as a defect (§13.1).
-8. **The tool inherits whatever permissions its host has.** Reading logs from S3 or Azure Blob means running somewhere with credentials, next to an unauthenticated local server. Mitigation: credentials are never stored by the app (§12), only configured connections are readable (§6.1), read-only permissions are what the docs ask for, and the connection test names the permissions it actually exercised so over-broad grants are visible.
+8. **An auditing tool that holds cloud keys is a target.** Reading logs from S3 or Azure Blob means either inheriting the host's permissions or storing a credential, and the credential store (§6.7) makes this process worth attacking in a way a report generator otherwise is not. This is a real cost accepted for a real reason: without it the tool is unusable for the analyst who was handed a read-only key and has no ambient identity. Mitigations are structural rather than advisory — write-only storage with no read path, OS keyring or a sealed file rather than homegrown crypto, `serve` refusing a non-loopback bind with a non-empty store and no token, short-lived kinds preferred and long-lived ones flagged, use audited per run, and read-only permissions in every setup instruction. The residual risk is a compromised host, where nothing the app does helps.
 9. **Incomplete log delivery looks exactly like less traffic.** Object storage is where logs go to be silently incomplete — a delivery lag, a lifecycle rule that expired last month's keys, a prefix nobody granted access to. The tool cannot tell "no requests" from "no logs". Mitigation: read failures are coverage failures with named objects and byte volumes, gaps in the observed timeline are reported against the requested window, and projections are gated on both — but a clean-looking run over quietly truncated data remains the residual risk, which is why the manifest names every object read.
 10. **A long-lived server process contradicts the in-memory design.** A run holds a whole dataset in memory; a server that accepts concurrent runs will be OOM-killed on the laptop this is meant to run on. Mitigation: concurrency 1 by default (§5.4), and the run store — not process memory — is what outlives a run.
 
