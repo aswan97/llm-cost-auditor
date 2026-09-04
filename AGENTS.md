@@ -47,12 +47,14 @@ Before starting work: `git checkout develop && git pull && git checkout -b featu
 
 ### A stored secret has exactly one exit
 
-The credential store (SPEC §6.7) hands a secret to the connector that needs it and to nothing else. There is no read API, no CLI command that prints one, no template that renders one, no debug flag that logs one, and no test fixture that round-trips a real value. Treat every one of those as a defect, not a convenience.
+A credential resolved from the host's ambient chain (SPEC §6.7) is a secret in memory, and it goes to the connector that needs it and to nothing else. There is no read API, no CLI command that prints one, no template that renders one, no debug flag that logs one, and no test fixture that round-trips a real value. Treat every one of those as a defect, not a convenience.
+
+This rule is in force in v1 even though **v1 stores no credentials** — ambient resolution still produces a live secret in the process. It tightens further, without changing shape, when the credential store lands in v1.1 ([design note](docs/design/credential-store.md)).
 
 Concretely:
 
 - Credential objects mask their `__str__` and `__repr__`, so a secret cannot reach a log line, an exception message, or a traceback by accident.
-- Nothing about a secret is written to `run.json`, `manifest.json`, `log.jsonl`, an event stream, a report, or a config file — those carry the `secret_ref` only.
+- Nothing about a secret is written to `run.json`, `manifest.json`, `log.jsonl`, an event stream, a report, or a config file — those carry the *identity* used (profile name, role ARN, managed identity client id), never a value.
 - Secrets are read from stdin or a prompt, never from argv, and never from a query string.
 - **Every change here needs a test that asserts the absence**, because absence is invisible in review: serialize a run record and a config with a credential attached and assert the value appears nowhere in the output; format the credential object and assert it is masked; call the API surface and assert no route returns it.
 
@@ -60,10 +62,12 @@ Adding a "just for debugging" print of a resolved credential is the kind of chan
 
 ### Don't write cryptography, and don't let it drift
 
-The sealed store (SPEC §6.7) uses libsodium primitives — Argon2id, XChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256 — through one module. Rules that follow from that:
+**v1 encrypts nothing** — the run store holds no secrets and credentials are never stored (SPEC §5.3, §6.7), so there is no cipher, no key, and no `pynacl` dependency in the first release. Adding one is a design change, not an implementation detail.
+
+The rules below apply the moment that changes — starting with the v1.1 credential store, whose sealed envelope uses libsodium primitives (Argon2id, XChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256) through one module. They are written down now because the cheapest time to lose an argument with them is before any code exists:
 
 - **No primitive is implemented here**, and none is composed ad hoc elsewhere. Encrypting something new means calling that module, not importing a cipher.
-- **Parameters travel with the ciphertext.** KDF cost, salt, nonce, and algorithm names live in the envelope header, never as an assumption about what the current build uses. A reader that encounters an unknown envelope version fails; it never infers one. Raising a cost parameter must leave existing stores openable, which is what `credentials rekey` is for.
+- **Parameters travel with the ciphertext.** KDF cost, salt, nonce, and algorithm names live in the envelope header, never as an assumption about what the current build uses. A reader that encounters an unknown envelope version fails; it never infers one. Raising a cost parameter must leave existing stores openable, which is what a rekey command is for.
 - **Nothing is encrypted with a key stored next to it.** That is filing, not encryption, and it is worse than plaintext because it reads as safe.
 - **Fail closed, always.** Authentication failure returns an error and no bytes — never partial plaintext, never a fallback path, never a "decrypt without verifying" branch for recovery.
 - **Test the failures, not just the success.** Tamper with ciphertext, nonce, associated data, and header; use the wrong passphrase; swap a record between refs; roll back the index. Each must fail closed and say so. A round-trip test alone proves only that the code can talk to itself.
