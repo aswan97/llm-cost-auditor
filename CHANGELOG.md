@@ -32,7 +32,33 @@ the merge if it is unchanged or undocumented here.
   envelope and `credentials rekey` to re-seal. SPEC.md §6.7 added; §2, §5.1, §6.1, §12,
   §13.1–13.3, §15 updated.
 
+- **Design: pre-implementation spec review (SPEC.md v1.2).** Resolved contradictions and gaps found reviewing
+  the design before the first module. Structural: one run is one directory with three resumable stages and an
+  explicit `--run`, replacing implicit inter-command state (§5.3, §13.3); `Store` split into `RecordStore` and
+  `RunStore` (§5.1); analyzer applicability is per-slice and findings name their slices (§5.2, §13.4); money is
+  integer micro-USD end to end (§6.4); ingest is bulk in v1 with incremental deferred to v1.1 (§6.6);
+  attribution runs waste first (§11.2); encryption is scoped to credentials only, and the derived store is no
+  longer encrypted (§5.3, §12). Security: reads are confined to a terminal-only source scope so connections stay
+  editable in the app (§6.1, §13.2), the bind interlock is re-checked on every credential write (§6.7), and the
+  loopback and "signed snapshot" claims are corrected to what they actually provide (§12, §13.6). New explicit
+  rules for timezone, currency, unknown cache TTL class, retry-vs-duplicate-delivery classification, baseline
+  coverage gating, the Tier A/B cache stage split, price-increase exposure (§11.5), upload staging with a 25 MB
+  limit, and exact-vs-declared-bound testing (§14). AGENTS.md gains the integer-money rule.
+
+- **Design: the credential store is deferred to v1.1.** v1 resolves cloud identity from the host's
+  ambient chain only and stores no secrets, so nothing in the system is encrypted, there is no crypto
+  dependency, and §12's no-authentication posture is true rather than propped up by a bind interlock.
+  An adversarial review found five of its significant remaining problems were in whether its *stated
+  protections hold* — a plaintext config that steers a credential with nothing authenticating the
+  destination (a SAS token, which travels in a URL, is exfiltrated outright), rollback detection whose
+  counter lives in the file being rolled back, and an idle re-lock a running server cannot recover
+  from — rather than in the plumbing. The design and all seven problems move to
+  `docs/design/credential-store.md` as v1.1 blocking work. Removes the Credentials page, three API
+  endpoints, the `credentials` CLI command, `--auth-token-file`, and the `keyring`/`pynacl`
+  dependencies. SPEC.md §2, §4, §5.1, §6.1, §6.7, §12, §13.1–13.3, §15 updated.
+
 ### Added
+- `docs/design/credential-store.md` — v1.1 credential store design and its unresolved security problems.
 - Branching model (`develop` / `feature/*` / `hotfix/*`) and release process — see CONTRIBUTING.md.
 - CI: ruff lint and format, strict mypy, pytest with coverage, and a price-literal guard.
 - Release automation: readiness checks on the release PR, GitHub Release on a `v*` tag.
