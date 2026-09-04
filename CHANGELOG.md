@@ -9,6 +9,12 @@ the merge if it is unchanged or undocumented here.
 
 ## [Unreleased]
 
+### Changed
+- **Design: the auditor is a self-hosted platform, not an offline CLI.** A local-first,
+  single-tenant web app (FastAPI + Jinja + HTMX) and the CLI are two drivers over one run
+  engine, with runs as durable artifacts in a filesystem run store. SPEC.md §1, §3, §4,
+  §5.3–5.4, §12, §13 rewritten accordingly; §13 subsections renumbered.
+
 ### Added
 - Branching model (`develop` / `feature/*` / `hotfix/*`) and release process — see CONTRIBUTING.md.
 - CI: ruff lint and format, strict mypy, pytest with coverage, and a price-literal guard.

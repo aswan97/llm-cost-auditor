@@ -16,6 +16,8 @@ Concretely, for this project:
 - **Prefer a function to a class, a dict to a model, and a module to a package** until something forces the upgrade. The exceptions are the data contracts — `RequestRecord`, `Finding`, config, price rows — which are pydantic models from day one because everything else is validated against them.
 - **Two provider adapters before generalizing adapters.** The abstraction that fits Anthropic alone will be wrong for Bedrock.
 - **No premature performance work.** In-memory at ~500k records is the stated target; optimize when a real dataset misses it, and profile before choosing what to change.
+- **The engine before the app** (SPEC §4, §13). The web app is part of v1, but it renders run records — it cannot be built against findings that don't exist yet. Build the run store and one analyzer's real output first, then the pages. No mock data in templates, ever: a page that renders plausible fake numbers is the exact failure this project is trying to avoid.
+- **The app is a driver, not a layer.** Every operation it performs is a CLI command first, and no analysis logic lives in a route handler, a template, or JavaScript. Server-rendered Jinja + HTMX; reach for a frontend framework only when a page has genuinely outgrown it, and say why.
 
 When a piece of the spec turns out to be harder or less valuable than it looked, say so and adjust the spec — don't build an elaborate version of something that shouldn't exist.
 
@@ -30,6 +32,7 @@ For any meaningful change:
 3. **Verify at least one number by hand.** Take a finding, recompute its savings from the fixture's known token counts and the test catalog rates, and confirm it matches. A finding nobody has ever hand-checked is a guess with formatting.
 4. **Check the boring parts too**: totals reconcile against baseline spend, marginal savings sum to the portfolio total, confidence tiers are what the evidence justifies, and the coverage panel honestly reports what was skipped.
 5. **Try the degraded paths.** Run against billing-only logs and against a dataset with no config at all — those are the common real first runs, and they must produce something useful rather than an empty report or a stack trace.
+6. **If the change touches the app, drive the app** — `serve`, start a run from the browser, watch it progress, open the findings. Then confirm the numbers on screen match the exported report for the same run, figure by figure. Two surfaces over one run record means any discrepancy is a defect, and the only way to see it is to look at both.
 
 Report what actually happened. If a run produced a suspicious number, say so with the output rather than moving on because the tests passed.
 

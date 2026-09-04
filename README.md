@@ -1,8 +1,10 @@
 # llm-cost-auditor
 
-An offline CLI that ingests LLM provider API logs and produces a ranked, evidence-backed savings report — where prompt caching is missing or misconfigured, where requests are wasted outright, where latency-tolerant work belongs on batch endpoints, and where a cheaper model would have sufficed.
+A self-hosted platform that ingests LLM provider API logs and produces a ranked, evidence-backed savings report — where prompt caching is missing or misconfigured, where requests are wasted outright, where latency-tolerant work belongs on batch endpoints, and where a cheaper model would have sufficed.
 
-> **Status: design phase.** [SPEC.md](SPEC.md) is complete; no code has been written yet. The CLI below describes the intended v1 interface, not working software.
+It runs on your own infrastructure, two ways over one engine: a **local web app** for analysts and engineers to run audits and browse findings, and a **CLI** for automation and CI gates. A run started in one is visible in the other.
+
+> **Status: design phase.** [SPEC.md](SPEC.md) is complete; no code has been written yet. The interfaces below describe the intended v1, not working software.
 
 ## Why
 
@@ -30,6 +32,20 @@ This tool finds those, quantifies them, and tells you the specific change to mak
 Anthropic, OpenAI, and cloud brokers (AWS Bedrock, Google Vertex AI, Azure AI Foundry) — each with its own price sheet, log shape, and reserved-capacity handling. Gateway logs (LiteLLM, OpenRouter, Helicone) are planned.
 
 ## Intended usage
+
+### The app
+
+```bash
+llm-cost-auditor serve          # http://127.0.0.1:8787
+```
+
+Point it at your logs (or upload them), start a run, watch it progress, and browse the findings — sorted and filtered by analyzer, workload, confidence tier, risk, and effort, each expanding into the evidence and the exact change to make. Coverage and workload pages state what was skipped and which findings are withheld pending a declared risk tier.
+
+It is single-tenant and binds localhost by default: there are no accounts, because there is nothing to authenticate on a server that is yours. Deploying it for a team means putting it behind the SSO proxy or VPN you already have.
+
+### The CLI
+
+Every operation the app performs is a command first, so audits fit in CI and cron:
 
 ```bash
 llm-cost-auditor ingest  ./logs/*.jsonl --source anthropic
@@ -59,8 +75,8 @@ Enterprise pricing — negotiated rates, discounts, prepaid credits, volume tier
 
 ## Privacy
 
-Runs entirely on your infrastructure. Raw prompt content is never persisted — hashing and fingerprinting happen at ingest; redaction runs before anything is stored; evidence excerpts in reports are opt-in; the derived store is encrypted with a retention TTL. Any outbound call is gated per-workload and itemized in the report.
+Runs entirely on your infrastructure — the web app is a server you start, not a service you send logs to. The app makes no outbound calls of its own: no CDN assets, no telemetry, no update check. Raw prompt content is never persisted — hashing and fingerprinting happen at ingest; redaction runs before anything is stored; evidence excerpts in reports are opt-in; the derived store is encrypted with a retention TTL. Any outbound call is gated per-workload and itemized in the report.
 
 ## Non-goals
 
-No self-hosted/GPU cost modeling, and no live enforcement — this tool recommends, humans implement.
+No self-hosted/GPU cost modeling, and no live enforcement — this tool recommends, humans implement. Not multi-tenant: no accounts, no orgs, no hosted service, and no finding-triage workflow — findings export to whatever tracker you already use.

@@ -1,18 +1,23 @@
 # LLM Cost & Routing Auditor — Specification
 
-**Status:** Draft v1.0 · **Date:** 2026-09-04 · **Repo:** `llm-cost-auditor`
+**Status:** Draft v1.1 · **Date:** 2026-09-04 · **Repo:** `llm-cost-auditor`
+
+*Changed in v1.1: the auditor is a self-hosted platform (local web app + CLI over one run engine), not an offline CLI. See §1, §3, §4, §5.3–5.4, §12, §13.*
 
 ---
 
 ## 1. Summary
 
-An offline CLI that ingests provider API logs and produces a **ranked, evidence-backed savings report**: where prompt caching is missing or misconfigured, where requests are wasted outright, where latency-tolerant work belongs on batch endpoints, and where a cheaper model would have sufficed.
+A **self-hosted platform** that ingests provider API logs and produces a **ranked, evidence-backed savings report**: where prompt caching is missing or misconfigured, where requests are wasted outright, where latency-tolerant work belongs on batch endpoints, and where a cheaper model would have sufficed.
 
-Three properties define the product:
+It is used two ways over one engine (§13): a **local web app** (`llm-cost-auditor serve`) where analysts and engineers upload logs, watch a run progress, browse findings, and edit the config that gates them; and a **CLI** for automation, CI gates, and scripted re-audits. Neither is a wrapper around the other — both call the same run engine, and a run started in one is visible in the other.
+
+Four properties define the product:
 
 1. **It never sits in the request path.** It is an auditor, not a gateway. The only outbound network calls it ever makes are opt-in, budget-capped shadow-replay calls used to *earn evidence* for routing claims.
-2. **It degrades gracefully with log fidelity.** Every analyzer declares its minimum data requirements. Missing data becomes an *instrumentation finding* with a dollar ceiling, not a silent skip.
-3. **It never overstates.** Every finding carries a confidence tier and a low/expected/high range, findings are de-overlapped before totalling, and projections are gated on data coverage.
+2. **It runs on the user's infrastructure.** The web app is a local-first, single-tenant server the user starts themselves; log data never leaves their trust boundary, and there is no hosted service to send it to (§12).
+3. **It degrades gracefully with log fidelity.** Every analyzer declares its minimum data requirements. Missing data becomes an *instrumentation finding* with a dollar ceiling, not a silent skip.
+4. **It never overstates.** Every finding carries a confidence tier and a low/expected/high range, findings are de-overlapped before totalling, and projections are gated on data coverage.
 
 ---
 
@@ -29,6 +34,8 @@ Three properties define the product:
 
 - **Self-hosted / GPU cost modeling.** No open-weights TCO, GPU-hour math, or vLLM/deployment economics. Provider-API spend only.
 - **Live enforcement.** The tool never routes, caches, batches, or proxies real traffic. It recommends; humans implement.
+- **Multi-tenancy, accounts, and a hosted service.** The platform is single-tenant and runs where the user puts it. No sign-up, no org/user management, no tenant isolation, no billing. Authentication is a deployment concern, not a product feature (§13.1).
+- **Collaboration features.** No comments, assignments, notifications, or finding-triage workflow in v1. Findings are exported (`findings.json`, report HTML) into whatever tracker the team already uses.
 
 ### Deferred, not excluded (roadmap)
 
@@ -39,11 +46,21 @@ Three properties define the product:
 
 ## 3. Audience and deliverable
 
-One report artifact, two audiences, plus machine-readable output:
+One set of findings, two audiences, three surfaces. The **content** below is fixed; the surfaces differ only in how it is navigated.
 
 - **Executive section** — total spend over the observed window, waste percentage, top 5 findings with dollars and risk rating, portfolio total after overlap de-duplication, a section that would list the top 5 findings that would be hit the hardest with a token price increase.
 - **Engineering section** — per finding: evidence, affected workload(s), the exact config/code change, effort estimate, risk notes, and verification steps.
 - **`findings.json`** — the same findings machine-readably, for CI gates, dashboards, and diffing across runs.
+
+Surfaces:
+
+| Surface | For | Notes |
+|---|---|---|
+| **Web app** (§13.1) | Analysts and engineers doing the audit | Interactive: filter and sort findings, drill into evidence, compare runs, edit config and re-run. The primary surface. |
+| **Exported report** (`report.html` / `report.md`) | Sharing the result with people who will not open the app | A static, self-contained snapshot of the two sections above. Generated from the same run record the app reads. |
+| **CLI + `findings.json`** (§13.3) | Automation, CI gates, scheduled re-audits | Headless. Every operation the app performs is a CLI command first. |
+
+The two audiences are not two products: the executive framing is the app's landing view for a run, and the engineering detail is one click down from any finding.
 
 ---
 
@@ -58,11 +75,31 @@ One report artifact, two audiences, plus machine-readable output:
 
 The data model, pricing engine, workload profiler, confidence framework, and attribution engine are built in v1 because every later analyzer depends on them. Sections 8–10 specify v1.1/v1.2 analyzers in full so the v1 foundations are built to fit them.
 
+**Surfaces by release.** The engine and the CLI come first — they are what the analyzers are tested through, and the app has nothing to render until findings exist.
+
+| Release | Surface |
+|---|---|
+| **v1** | CLI over the run engine; run store on disk (§5.3); web app covering the core loop — upload/point at logs, run, browse findings, view coverage, download the report |
+| **v1.1** | In-app config editing with validation and re-run; run comparison (`verify` diff) in the UI |
+| **v1.2** | Replay budget approval flow in the app (a dry-run estimate the user confirms before any outbound call, §10.3) |
+
+The app is not deferred to a "phase 2" — a run that only a CLI can start is not the product described in §1 — but within v1 it is built after the first analyzer produces real findings, not before.
+
 ---
 
 ## 5. Architecture
 
+The engine is a pure pipeline from logs to findings. The web app and the CLI are two thin drivers over it — neither owns analysis logic, and the pipeline knows about neither.
+
 ```
+   web app (§13.1)          CLI (§13.3)
+        │                        │
+        └──────────┬─────────────┘
+                   ▼
+        ┌────────────────────┐   start / observe / cancel a run
+        │    Run engine      │   run record + status + artifacts → run store (§5.3)
+        └──────────┬─────────┘
+                   ▼
 log files / exports
       │
       ▼
@@ -93,11 +130,15 @@ log files / exports
 └───────┬───────┘
         ▼
    report.html / report.md / findings.json / snapshot.json
+        │
+        ▼
+   run store → served by the app, read by `verify`, diffed across runs
 ```
 
 ### 5.1 Stack
 
 - **Python 3.12+**, `polars` (in-memory frames), `pydantic` v2 (models/config), `typer` (CLI), `jinja2` (report), `datasketch`-style MinHash/LSH (vendored or dependency), provider tokenizers behind an optional extra.
+- **Web app: `fastapi` + `uvicorn`, server-rendered `jinja2`, HTMX for interactivity.** No JavaScript build step, no second language, no SPA. The same template layer renders both the app's pages and the exported static report, so the two cannot drift. HTMX covers the interactions v1 actually needs — polling a running job, filtering and sorting a findings table, expanding evidence, submitting config — and a page that genuinely outgrows it is the signal to reconsider, not a reason to start with React. Charts are server-rendered inline SVG for the same reason.
 - **In-memory processing** targeting up to ~500k requests per run on a laptop. Storage is behind a `Store` seam (`load()`, `iter_records()`, `persist_derived()`) so it can be swapped for DuckDB/Parquet without touching analyzers.
 - **Rust-portability discipline.** The three hot paths — prefix trie construction, MinHash/LSH, and the discrete-event cache simulator — live behind narrow, pure interfaces with no framework coupling, so each can be replaced by a Rust extension (PyO3) independently if profiling demands it. Everything else stays Python.
 
@@ -115,7 +156,39 @@ class Analyzer(Protocol):
     def analyze(self, ctx: AnalysisContext) -> list[Finding]: ...
 ```
 
-`BLOCKED` does not mean silence: the runner converts it into an **instrumentation finding** (§13.3). Log adapters implement a parallel `SourceAdapter` protocol, so new providers are additive.
+`BLOCKED` does not mean silence: the runner converts it into an **instrumentation finding** (§13.5). Log adapters implement a parallel `SourceAdapter` protocol, so new providers are additive.
+
+### 5.3 Runs and the run store
+
+Making this a platform rather than a command means one new durable concept: **the run**. Everything the app shows is a view of a run, and nothing about a run depends on the process that started it still being alive.
+
+A run is a directory under the workspace root (`./.llm-cost-auditor/runs/<run_id>/` by default, configurable):
+
+```
+runs/<run_id>/
+  run.json          status, timings, config digest, catalog version, source paths, error (if any)
+  records.parquet   normalized RequestRecords for this run (derived, redacted — never raw prompt text)
+  findings.json     the finding set (§13.4)
+  snapshot.json     the verification baseline (§13.6)
+  report.html       exported report
+  log.jsonl         structured progress events, appended as the run executes
+```
+
+**Rules:**
+
+- **Runs are immutable once complete.** Re-running with edited config produces a *new* run that records its `parent_run_id`, which is what makes run-to-run comparison (§13.6) honest — there is no in-place mutation to lose.
+- **The store is a filesystem directory, not a database.** It is inspectable, diffable, copyable to a colleague, and deletable with `rm -rf`. This is the same `Store` seam as §5.1: DuckDB replaces the parquet/JSON files behind it when scale demands, and nothing above the seam changes.
+- **The run record is the only contract between the engine and the app.** The app reads `run.json`, `findings.json`, and `log.jsonl`; it never reaches into analyzer internals. A run produced by the CLI on a build server renders identically in the app.
+- **Retention applies to runs** (§12): the TTL that purges ingested data purges the run's `records.parquet` while leaving its findings and report, so an old audit stays readable after its underlying data expires.
+
+### 5.4 Job execution
+
+An audit takes minutes, not milliseconds, so the app cannot run one inside a request handler.
+
+- **One background worker in the server process**, executing runs from a queue with a configurable concurrency of 1 by default. A run holds a whole dataset in memory (§5.1); running two concurrently on a laptop is how the tool gets OOM-killed.
+- **Progress is events, not polling into the engine.** The engine appends structured events to `log.jsonl` (`stage`, `pct`, `message`, `counts`); the app tails that file. The CLI renders the same events as a progress bar. One producer, two renderers.
+- **A crashed or killed server leaves a run marked `running` with a stale heartbeat.** On startup the server marks such runs `interrupted` rather than resuming them — a half-analyzed dataset must never produce a report.
+- **No Celery, no Redis, no external broker.** A threaded queue over the run store is sufficient for a single-tenant local server, and the queue is behind a narrow interface (`submit()`, `status()`, `cancel()`) so a real broker can replace it if the shared-deployment case ever arrives.
 
 ---
 
@@ -333,7 +406,7 @@ architecture:
 3. **Topology mismatches become findings.** When fingerprint clusters cut across declared component boundaries — one declared component serving three prompt shapes, or three components sharing one skeleton — that is surfaced. Both directions are useful: the first usually means an undeclared branch, the second means an unrecognized shared prefix and therefore an unrealized cache opportunity.
 4. **`shared_assets` directly seeds cache analysis.** A declared shared system prompt or toolset tells the prefix analyzer where to look before any trie is built, and — combined with `deployment` — reveals the case clustering cannot see on its own: the same 4k-token scaffold cached separately in three regions or deployments, paying the write premium three times (§9.2 partitioning).
 5. **`children` / `trace_key` enable cross-request analysis.** Agent-loop and pipeline traces are linked into one logical unit, so sub-agent spend is attributed to the orchestrating workload, conversation-replay waste is measured across the whole trace, and per-stage cost is rolled up end to end.
-6. **`unit_of_work` converts findings into unit economics** — "$0.41 per claim processed, of which $0.17 is re-sent context" — which is both the more actionable framing and the one that survives traffic growth in the verification diff (§13.4).
+6. **`unit_of_work` converts findings into unit economics** — "$0.41 per claim processed, of which $0.17 is re-sent context" — which is both the more actionable framing and the one that survives traffic growth in the verification diff (§13.6).
 7. **`environments` keeps non-prod out of the numbers**, while still reporting non-prod spend separately; eval-harness and staging traffic otherwise distort both baseline spend and determinism profiling.
 
 The map is validated on load: unknown component references, unmatched matchers (declared components that match zero requests), and overlapping matchers all produce config errors rather than silent misgrouping.
@@ -530,7 +603,17 @@ Extrapolating a month of savings from a Tuesday afternoon is the classic credibi
 
 ## 12. Privacy
 
-The tool runs on user infrastructure and may see prompt content. Posture, all four layers:
+The tool runs on user infrastructure and may see prompt content. Becoming a server changes the threat model — there is now a listening port and an upload endpoint — without changing the posture, because the server is theirs.
+
+**Layer 0 — the server is local and unauthenticated by design.**
+
+- `serve` **binds `127.0.0.1` by default.** Binding to any other interface requires an explicit `--host`, and the app prints a warning naming what is being exposed.
+- **There is no authentication in v1, and that is a deliberate scope decision, not an oversight.** A single-tenant local server with no accounts has nothing to authenticate; adding a homegrown login would create the illusion of a security boundary without the substance of one. Teams deploying it beyond one machine put it behind whatever they already use — an SSO reverse proxy, a VPN, an SSH tunnel. The docs say this plainly rather than shipping a password field.
+- **The app makes no outbound calls of its own** — no CDN assets, no telemetry, no update check. Every asset is served from the package, which is also why the CSP can forbid external origins outright. The only outbound calls in the entire system remain the opt-in replay calls of §10.3.
+- **Uploaded logs are treated as ingest input, not as stored files.** They pass through the same redaction and fingerprinting pipeline (layers 1–2) and the upload is discarded; the run keeps derived records only.
+- **The API is CSRF-protected and path-confined.** State-changing endpoints require a same-origin token, and any server-side path the UI accepts (log locations, output directories) is resolved and confined to configured roots — a browser-reachable process that reads arbitrary filesystem paths is a file-disclosure bug regardless of who is on the other end.
+
+The four content layers are unchanged:
 
 1. **Never persist raw content.** Hashing and fingerprinting happen at ingest; raw text exists only in memory for the chunk being processed. The derived store contains no prompt text.
 2. **Redact before persisting anything derived.** Configurable detectors for emails, keys/tokens, card numbers, national ids, and user-supplied patterns; redaction runs before any storage and before any replay transmission.
@@ -541,9 +624,58 @@ Any outbound call (replay, embedding, judging) is gated per §10.3 and fully ite
 
 ---
 
-## 13. Report and CLI
+## 13. Interfaces — web app, API, CLI
 
-### 13.1 CLI
+One engine (§5), three drivers. The rule that keeps them honest: **every operation the app can perform exists as a CLI command first**, and the app calls the same run engine the CLI calls. Nothing is reachable only through a browser.
+
+### 13.1 Web app
+
+```
+llm-cost-auditor serve [--host 127.0.0.1] [--port 8787] [--workspace ./.llm-cost-auditor]
+```
+
+Starts the local server and prints the URL. Single tenant, no accounts (§12).
+
+**Pages, and nothing more in v1:**
+
+| Page | Contents |
+|---|---|
+| **Runs** | Every run in the store: status, window, source, baseline spend, portfolio savings, timestamp. Start a new run from here. |
+| **New run** | Point at log paths or upload files, pick source and window, attach `workloads.yaml` / `architecture.yaml` / commercial terms if any, pre-flight validation, submit. |
+| **Run overview** | The executive section (§3) for one run: baseline spend decomposed by workload, model, token class and status; waste percentage; portfolio total with the "sum of marginals" statement next to it; totals broken out per confidence tier. |
+| **Findings** | Sortable, filterable table — by analyzer, workload, confidence tier, risk, effort, realizability. Each row expands into the engineering detail: evidence, the exact change, verification steps, and both standalone and marginal savings. |
+| **Coverage** | What was skipped and why (§11.4): unpriced models, blocked analyzers and their instrumentation findings, fidelity tier per source, price-catalog staleness, cluster-quality warnings, whether the monthly projection was withheld. |
+| **Workloads** | Discovered clusters with their four profile axes (§8.3), which findings each produced, and which are withheld pending a declared blast radius — with the withheld dollar ceiling shown, so editing config has visible value. |
+| **Run detail** | Live progress while running (stage, records processed, elapsed), the structured log, and the downloadable artifacts. |
+
+**Interaction rules:**
+
+- **The app never invents a number the report does not contain.** Both render the same run record; a figure visible only in the browser is a bug.
+- **A running run is watchable, not blocking.** The run page streams progress from `log.jsonl` (§5.4); navigating away does not affect the run.
+- **Config edits create a new run** (§5.3), never mutate the current one, and the UI shows which run a comparison is against.
+- **Every finding links to its evidence and its provenance** — the pricing resolution chain (§7.2), the confidence penalties applied (§11.3), and the assumptions the analyzer declared.
+
+**Deliberately absent in v1:** accounts, roles, comments, saved views, dashboards over multiple runs, scheduling, and anything resembling a ticketing workflow.
+
+### 13.2 HTTP API
+
+The app is a client of a small JSON API; the same API is what a dashboard or a script would use if the CLI is the wrong shape for it.
+
+```
+POST   /api/runs                  start a run (config in body; returns run_id)
+GET    /api/runs                  list runs
+GET    /api/runs/{id}             run record: status, timings, totals
+GET    /api/runs/{id}/events      progress event stream (SSE) while running
+GET    /api/runs/{id}/findings    findings.json
+GET    /api/runs/{id}/report      report.html
+POST   /api/runs/{id}/cancel      cancel a queued or running run
+GET    /api/runs/{id}/diff/{base} realized vs projected against a baseline run (§13.6)
+POST   /api/config/validate       validate workloads/architecture/commercial config without running
+```
+
+It is deliberately thin: the API exposes runs and their artifacts, not analyzer internals. The HTML pages are server-rendered rather than built on top of this API (§5.1) — the API exists for programmatic callers, so it does not have to grow an endpoint for every UI affordance.
+
+### 13.3 CLI
 
 ```
 llm-cost-auditor ingest   <paths...> --source anthropic|openai|bedrock|vertex|foundry [--fidelity auto]
@@ -554,11 +686,16 @@ llm-cost-auditor audit    [--config workloads.yaml] [--architecture architecture
                            --replay-budget-usd 50 | --replay-budget-pct 0.5 --dry-run]
                           [--out report.html --json findings.json --snapshot snapshot.json]
                           [--explain-pricing <request_id>]   # print list → effective rate resolution chain
-llm-cost-auditor verify   --baseline snapshot.json   # realized vs projected
+llm-cost-auditor verify   --baseline snapshot.json | <run_id>   # realized vs projected
 llm-cost-auditor refresh-prices
+
+llm-cost-auditor serve    [--host 127.0.0.1] [--port 8787] [--workspace ./.llm-cost-auditor]
+llm-cost-auditor runs     [list | show <run_id> | rm <run_id>]   # the run store (§5.3)
 ```
 
-### 13.2 Finding schema
+`ingest`, `profile` and `audit` write into the run store like any other run, so work started at a terminal is visible in the app and vice versa. `--out` / `--json` / `--snapshot` additionally copy artifacts to a chosen path, for pipelines that want the file where they want it.
+
+### 13.4 Finding schema
 
 ```json
 {
@@ -581,7 +718,7 @@ llm-cost-auditor refresh-prices
 }
 ```
 
-### 13.3 Instrumentation findings
+### 13.5 Instrumentation findings
 
 When an analyzer is `BLOCKED`, the gap becomes a finding rather than silence:
 
@@ -589,7 +726,7 @@ When an analyzer is `BLOCKED`, the gap becomes a finding rather than silence:
 
 The dollar ceiling is explicitly bounded and tier-**Heuristic**; it exists to justify the instrumentation work, and the report says so.
 
-### 13.4 Verification loop
+### 13.6 Verification loop
 
 Each `audit` writes a signed **snapshot**: traffic mix, unit costs, workload profiles, catalog version, and every finding. `verify --baseline` diffs a later run against it and reports **realized vs projected** savings per finding, **normalized for volume change** so that traffic growth cannot mask a win (or manufacture one). Findings are marked `implemented` / `partially implemented` / `not detected` based on observable signals (cache-read tokens appearing, batch flags appearing, model mix shifting).
 
@@ -613,6 +750,9 @@ No external oracle exists for "you would have saved $X", so correctness is estab
 3. **Semantic caching is a correctness risk sold as savings.** Mitigation: MinHash default (near-duplicate, not paraphrase), embeddings opt-in with an explicit threshold and estimated false-hit rate, suppressed entirely above `medium` blast radius.
 4. **Template fingerprinting drives everything and can be wrong.** Over-merging inflates cache findings; over-splitting hides them. Mitigation: cluster-quality metrics in the report, user override via config, and a warning when intra-cluster variance is extreme.
 5. **Committed spend can make every finding worth $0.** Mitigation: realizable-vs-gross reported separately, always.
+6. **A UI makes numbers look more certain than they are.** A dollar figure in a styled dashboard reads as fact in a way the same figure in a terminal does not, and confidence tiers are exactly what users skim past. Mitigation: the tier and the low–high range are part of every savings figure's presentation, not a column users can hide; the portfolio total never appears without the "sum of marginals" statement next to it; withheld projections show the warning in place of the number rather than omitting the panel.
+7. **Two surfaces can drift into two truths.** Mitigation: the app and the exported report render the same run record through the same template layer, and a figure computed in a view rather than by the engine is treated as a defect (§13.1).
+8. **A long-lived server process contradicts the in-memory design.** A run holds a whole dataset in memory; a server that accepts concurrent runs will be OOM-killed on the laptop this is meant to run on. Mitigation: concurrency 1 by default (§5.4), and the run store — not process memory — is what outlives a run.
 
 ---
 
@@ -622,3 +762,6 @@ No external oracle exists for "you would have saved $X", so correctness is estab
 - Do we support a warehouse-pushdown execution mode (BigQuery/Snowflake) before or after the DuckDB backend?
 - Cascade findings require an escalation *signal* to exist; do we recommend one, or only surface cascades where a validator is already present in the logs?
 - Licensing and distribution model for the price catalog updates.
+- Does the app ever need to write config back to the user's repo, or only offer generated config for download? Writing files a browser session chose the contents of is a meaningfully larger trust ask.
+- Is a packaged container image part of the v1 deliverable, or is `pip install` + `serve` enough for the first users?
+- The shared-deployment case (a team pointing one instance at a shared log export) is out of scope for v1 but keeps being asked for. What is the smallest thing that would make it defensible — a reverse-proxy deployment guide, or actual identity in the product?

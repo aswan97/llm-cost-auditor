@@ -63,7 +63,7 @@ continues, cut one then and treat it as a temporary `develop`.
    - bump `version` in `pyproject.toml` (SemVer — breaking / feature / fix);
    - move the `Unreleased` entries in `CHANGELOG.md` into a `## [x.y.z] - YYYY-MM-DD` section.
 3. **Open the release PR: `develop` → `main`.** The `Release check` workflow verifies the source branch, that the version was actually bumped past the latest tag, and that the CHANGELOG documents it.
-4. **Verify like a user** (AGENTS.md): run the built CLI end to end on sample logs, read the report, hand-check one savings figure. Green tests alone do not qualify a release of a tool whose failure mode is a confident wrong number.
+4. **Verify like a user** (AGENTS.md): run the built CLI end to end on sample logs, read the report, hand-check one savings figure, then `serve` and confirm the app shows the same numbers for the same run. Green tests alone do not qualify a release of a tool whose failure mode is a confident wrong number.
 5. **Merge** the PR into `main` (merge commit, not squash — `main` and `develop` must share history).
 6. **Tag `main`:**
    ```bash
