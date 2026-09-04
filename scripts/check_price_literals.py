@@ -36,7 +36,7 @@ PRICE_NAME_FRAGMENTS = (
 )
 
 # Numbers that are never a price, whatever they are called.
-BENIGN = {0, 0.0, 1, 1.0, -1}
+BENIGN = {0, 1, -1}  # int/float compare equal in a set, so 0.0 and 1.0 are already covered
 
 SUPPRESSION = "noqa: price-literal"
 

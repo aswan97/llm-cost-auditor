@@ -27,6 +27,9 @@ packages = ["src/llm_cost_auditor"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Documentation code blocks are illustrative and rely on comment alignment for
+# readability; the formatter would rewrite them. Docs are not linted or formatted.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
