@@ -53,7 +53,7 @@ Enterprise pricing — negotiated rates, discounts, prepaid credits, volume tier
 ## Documentation
 
 - **[SPEC.md](SPEC.md)** — full design: architecture, data model, analyzers, pricing engine, attribution and confidence, replay harness, privacy posture, validation strategy, and stated known tensions.
-- **[CLAUDE.md](CLAUDE.md)** — engineering guidelines and hard rules for contributors.
+- **[AGENTS.md](AGENTS.md)** — engineering guidelines and hard rules for contributors.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — branching model (`develop` / `feature/*` / `hotfix/*`), CI gates, and the release process.
 - **[CHANGELOG.md](CHANGELOG.md)** — release history.
 

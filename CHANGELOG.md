@@ -20,5 +20,5 @@ Design phase. No runtime code yet.
 
 ### Added
 - SPEC.md — full v1 design for the cost and routing auditor.
-- CLAUDE.md — engineering guidelines and hard rules.
+- AGENTS.md — engineering guidelines and hard rules.
 - README.md — project overview and intended usage.
