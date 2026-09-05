@@ -103,7 +103,16 @@ def create_app(workspace: Path) -> FastAPI:
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # `same-origin` and not `no-referrer`, which is the stricter-looking
+        # choice and breaks the app. Under `no-referrer` a browser sends
+        # `Origin: null` on every non-CORS non-GET request — which is exactly a
+        # form POST navigation — so the origin check below refused every
+        # button that submits a form, while the HTMX buttons kept working
+        # because XHR is CORS-mode and keeps its real origin. Nothing is
+        # weakened: the referrer still never leaves this origin, and a foreign
+        # page setting its own `no-referrer` still arrives as `null` and is
+        # still refused.
+        response.headers["Referrer-Policy"] = "same-origin"
         response.set_cookie(CSRF_COOKIE, csrf_token, httponly=False, samesite="strict", path="/")
         return response
 

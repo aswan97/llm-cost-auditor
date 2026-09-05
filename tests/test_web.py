@@ -138,6 +138,38 @@ def test_cross_origin_requests_are_refused(client: Any) -> None:
     assert "cross-origin" in response.json()["error"]
 
 
+def test_an_opaque_origin_is_refused(client: Any) -> None:
+    """`null` is what a sandboxed frame or a `no-referrer` foreign page sends.
+
+    No legitimate caller sends it: this app's own pages carry a real origin, and
+    a client that sends no `Origin` at all is checked on the token instead.
+    """
+    response = client.post(
+        "/api/connections",
+        headers={**token(client), "origin": "null"},
+        json={"id": "x", "uri": "/tmp"},
+    )
+    assert response.status_code == 403
+    assert "cross-origin" in response.json()["error"]
+
+
+def test_the_referrer_policy_does_not_strip_our_own_origin(client: Any) -> None:
+    """Load-bearing, not cosmetic — `no-referrer` here breaks every form button.
+
+    Per the Fetch standard, a browser serializes the `Origin` header as `null`
+    on a non-CORS non-GET request whose referrer policy is `no-referrer`. A form
+    POST navigation is exactly that, so the whole app's `Start run`, `Cancel`,
+    `Add connection` and `Delete` submissions arrived opaque and were refused by
+    the origin check above, while the HTMX buttons worked because XHR is
+    CORS-mode and keeps its origin. TestClient sends whatever headers it is
+    given and so cannot reproduce a browser here; the response header is the
+    knob that caused it, so that is what this pins.
+    """
+    policy = client.get("/").headers["referrer-policy"]
+    assert policy == "same-origin"
+    assert policy != "no-referrer"
+
+
 def test_reads_are_not_gated(client: Any) -> None:
     client.cookies.clear()
     assert client.get("/api/runs").status_code == 200

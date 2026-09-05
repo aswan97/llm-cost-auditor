@@ -59,6 +59,16 @@ the merge if it is unchanged or undocumented here.
 - **Docker** as the reference environment for running and testing the platform:
   `docker compose run --rm test`, `... run --rm cli <args>`, `... up app`.
 
+### Fixed
+- **Every form button in the web app was refused as cross-origin.** The app sent
+  `Referrer-Policy: no-referrer`, and per the Fetch standard a browser serializes the
+  `Origin` header as `null` on a non-CORS non-GET request under that policy — which is
+  precisely a form POST navigation. So `Start run`, `Cancel`, `Add connection` and
+  `Delete connection` all arrived opaque and were rejected by the CSRF origin check,
+  while the HTMX buttons kept working because XHR is CORS-mode and keeps its real
+  origin. The policy is now `same-origin`: the referrer still never leaves this origin,
+  and an opaque `null` origin is still refused.
+
 ### Changed
 - CI no longer self-skips mypy and pytest; the scaffolding guards are removed now that the
   first module has landed.
