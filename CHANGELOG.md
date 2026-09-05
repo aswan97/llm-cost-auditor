@@ -48,6 +48,11 @@ the merge if it is unchanged or undocumented here.
   discarded, label values are redacted before storage, and tests assert the *absence* of
   prompt text, email addresses, and credential-shaped strings in every run artifact.
 
+- **Window coverage is stated, not inferred.** A run whose objects hold nothing inside
+  the requested window, or whose observed range falls a day or more short of it, says so
+  in the coverage panel (SPEC.md §6.6, §15.9). Neither is gated — every byte was read —
+  but "no traffic" and "the window missed the data" are no longer the same silence.
+
 - **Hand-computed ingest fixtures** in `tests/fixtures/anthropic/`, with the arithmetic for
   every expected value derived line by line in a README alongside them, asserted exactly.
 
