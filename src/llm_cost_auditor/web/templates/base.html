@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}llm-cost-auditor{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <span class="brand">llm-cost-auditor</span>
+  <nav>
+    <a href="/" class="{{ 'on' if nav == 'runs' }}">Runs</a>
+    <a href="/connections" class="{{ 'on' if nav == 'connections' }}">Connections</a>
+    <a href="/runs/new" class="{{ 'on' if nav == 'new' }}">New run</a>
+  </nav>
+  <span class="ws mono">{{ workspace }}</span>
+</header>
+
+<main>
+  {# Every page states what this build can and cannot do. A UI makes numbers
+     look more certain than they are (SPEC.md §15.6); the honest version of
+     that here is to say plainly that no number has been produced yet. #}
+  <div class="note">
+    <strong>Ingest-stage build</strong>
+    This build implements ingest only — connectors, decoding, the Anthropic
+    adapter, retry classification, the run store, and coverage. There is no
+    pricing engine and there are no analyzers yet, so no page here shows a
+    dollar figure or a finding. Everything displayed is read from the run
+    record on disk.
+  </div>
+  {% block body %}{% endblock %}
+</main>
+
+<footer>
+  Local, single-tenant, no accounts — the server holds no secrets (SPEC.md §12).
+  Source scope: {% if sources %}<span class="mono">{{ sources | join(', ') }}</span>{% else %}empty{% endif %}
+  &middot; terminal-only.
+</footer>
+
+<script>
+  // The CSRF token travels on every htmx request. There is nothing to
+  // authenticate (SPEC.md §12); this stops a foreign page driving the server.
+  document.body.addEventListener('htmx:configRequest', function (event) {
+    event.detail.headers['x-csrf-token'] = '{{ csrf_token }}';
+  });
+</script>
+</body>
+</html>

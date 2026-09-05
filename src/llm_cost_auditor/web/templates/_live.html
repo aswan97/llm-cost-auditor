@@ -1,0 +1,130 @@
+<div id="live"
+     {% if not run.status.terminal %}
+     hx-get="/runs/{{ run.run_id }}/live" hx-trigger="every 2s" hx-swap="outerHTML"
+     {% endif %}>
+
+  <h2>
+    Progress
+    <span class="pill {{ run.status.value }}">{{ run.status.value }}</span>
+  </h2>
+  {% set pct = (events | selectattr('pct', 'defined') | map(attribute='pct') | list | last) or 0 %}
+  <div class="panel">
+    <div class="bar"><span style="width: {{ pct }}%"></span></div>
+    <p class="small muted mt" style="margin-bottom:0">
+      Stage: {{ run.stage.value if run.stage else '—' }} ·
+      records: {{ run.record_count }}
+      {% if run.error %}<br><span style="color:var(--bad)">{{ run.error }}</span>{% endif %}
+    </p>
+  </div>
+
+  {% if run.coverage %}
+  {% set cov = run.coverage %}
+  <h2>Coverage</h2>
+  {% for reason in cov.gating_reasons %}
+    <div class="note bad"><strong>Coverage failure</strong>{{ reason }}</div>
+  {% endfor %}
+  {% for warning in cov.warnings %}
+    <div class="note warn">{{ warning }}</div>
+  {% endfor %}
+
+  <div class="panel scroll">
+    <table>
+      <tbody>
+        <tr><td>Objects listed / read</td>
+            <td class="num">{{ cov.listed_objects }} / {{ cov.read_objects }}</td></tr>
+        <tr><td>Bytes listed / read</td>
+            <td class="num">{{ "{:,}".format(cov.listed_bytes) }} / {{ "{:,}".format(cov.read_bytes) }}</td></tr>
+        <tr><td>Missing bytes</td>
+            <td class="num">{{ "{:,}".format(cov.missing_bytes) }} ({{ "%.2f"|format(cov.missing_pct) }}%)</td></tr>
+        <tr><td>Objects pruned by window</td><td class="num">{{ cov.pruned_by_window }}</td></tr>
+        <tr><td>Records parsed</td><td class="num">{{ cov.records_parsed }}</td></tr>
+        <tr><td>Records rejected</td><td class="num">{{ cov.records_rejected }}</td></tr>
+        <tr><td>Records outside window</td><td class="num">{{ cov.records_outside_window }}</td></tr>
+        <tr><td>Duplicate deliveries collapsed <span class="muted small">({{ cov.dedupe_method }})</span></td>
+            <td class="num">{{ cov.duplicates_collapsed }}</td></tr>
+        <tr><td>Retry attempts linked</td><td class="num">{{ cov.retry_attempts_linked }}</td></tr>
+        <tr><td>Records with unknown cache TTL class</td>
+            <td class="num">{{ cov.ttl_class_unknown_records }}</td></tr>
+        <tr><td>Baseline is a lower bound</td>
+            <td class="num">{{ 'yes' if cov.baseline_is_lower_bound else 'no' }}</td></tr>
+        <tr><td>Monthly projection withheld</td>
+            <td class="num">{{ 'yes' if cov.projection_withheld else 'no' }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted">
+    Coverage is computed from the manifest, not from what succeeded. Any unread
+    object makes the baseline an explicit lower bound; past
+    <code>coverage.max_missing_pct</code> the savings figures are withheld
+    entirely, because a baseline over 87% of the logs is not a smaller number —
+    it is a wrong one (SPEC.md §6.1, §11.4).
+    The percentage is a share of <em>stored</em> bytes, so where a compressed
+    object goes unread next to plain ones it understates the share of records
+    lost — read the named objects above, not just the ratio.
+  </p>
+  {% endif %}
+
+  {% if run.slices %}
+  <h2>Slices</h2>
+  <div class="panel scroll">
+    <table>
+      <thead><tr><th>Connection</th><th>Source</th><th>Fidelity</th><th>Per-record mix</th>
+        <th class="num">Records</th><th>Observed range (UTC)</th></tr></thead>
+      <tbody>
+        {% for s in run.slices %}
+        <tr>
+          <td class="mono">{{ s.connection_id }}</td>
+          <td>{{ s.source }}</td>
+          <td><span class="pill">tier {{ s.fidelity.value }}</span></td>
+          <td class="small mono">{{ s.fidelity_counts }}</td>
+          <td class="num">{{ s.records }}</td>
+          <td class="small mono">{{ s.observed_start }} .. {{ s.observed_end }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted">
+    A slice is the unit of analyzer applicability. Every finding will name the
+    slices it covers and the tier that produced it, so no finding can be read as
+    covering traffic it never saw (SPEC.md §5.2).
+  </p>
+  {% endif %}
+
+  {% if manifest %}
+  <h2>Manifest</h2>
+  <div class="panel scroll">
+    <table>
+      <thead><tr><th>Object</th><th>Detected</th><th class="num">Size</th>
+        <th class="num">Read</th><th class="num">Parsed</th><th class="num">Rejected</th>
+        <th class="num">Outside window</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for e in manifest %}
+        <tr>
+          <td class="mono small" title="{{ e.etag }}">{{ e.uri }}</td>
+          <td class="small">{{ e.compression or '—' }} / {{ e.container or '—' }}
+            {% if e.detected_by %}<span class="muted">({{ e.detected_by }})</span>{% endif %}</td>
+          <td class="num">{{ "{:,}".format(e.size_bytes) }}</td>
+          <td class="num">{{ "{:,}".format(e.bytes_read) }}</td>
+          <td class="num">{{ e.records_parsed }}</td>
+          <td class="num">{{ e.records_rejected }}</td>
+          <td class="num">{{ e.records_outside_window }}</td>
+          <td>{% if e.status == 'ok' %}<span class="pill ok">ok</span>
+              {% else %}<span class="pill bad" title="{{ e.error }}">failed</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% for e in manifest if e.status != 'ok' %}
+    <div class="note bad"><strong>Unread object</strong>
+      <span class="mono small">{{ e.uri }}</span> ({{ "{:,}".format(e.size_bytes) }} bytes)<br>{{ e.error }}</div>
+  {% endfor %}
+  {% endif %}
+
+  <h2>Log</h2>
+  <div class="panel">
+    <div class="log">{% for e in events %}<span class="ev">{{ e.ts }}</span> <span class="{{ e.event }}">[{{ e.event }}]</span> {{ e.message or '' }}
+{% endfor %}{% if not events %}<span class="ev">no events yet</span>{% endif %}</div>
+  </div>
+</div>

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% set nav = 'runs' %}
+{% block title %}Runs · llm-cost-auditor{% endblock %}
+{% block body %}
+<h1>Runs</h1>
+<p class="sub">Every run in the store. A run started at a terminal appears here, and vice versa.</p>
+
+<div class="actions" style="margin-bottom:1rem">
+  <a class="btn" href="/runs/new">New run</a>
+</div>
+
+{% if not runs %}
+  <div class="panel muted">
+    No runs yet. Start one from <a href="/runs/new">New run</a>, or at a terminal:
+    <code>llm-cost-auditor ingest &lt;connection-id&gt;</code>
+  </div>
+{% else %}
+<div class="panel scroll">
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th><th>Status</th><th>Stage</th><th>Connections</th><th>Window</th>
+        <th class="num">Records</th><th class="num">Objects</th><th>Started</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><a href="/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
+        <td><span class="pill {{ run.status.value }}">{{ run.status.value }}</span></td>
+        <td>{{ run.stage.value if run.stage else '—' }}</td>
+        <td>{{ run.request.connection_ids | join(', ') }}</td>
+        <td>{{ run.request.window or 'all' }}</td>
+        <td class="num">{{ run.record_count }}</td>
+        <td class="num">{{ run.coverage.read_objects if run.coverage else '—' }}</td>
+        <td>{{ run.created_at.strftime('%Y-%m-%d %H:%M:%SZ') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="small muted">
+  Columns are counts of what was read. Baseline spend, waste percentage, and the
+  portfolio total belong here once pricing and the analyzers exist (SPEC.md §13.1).
+</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,39 @@
+{% if error %}
+  <div class="note bad"><strong>Cannot estimate</strong>{{ error }}</div>
+{% else %}
+<div class="panel">
+  <h3>Pre-flight estimate</h3>
+  <dl class="facts">
+    <dt>Window</dt><dd>{{ estimate.window }}</dd>
+    <dt>Objects to read</dt><dd>{{ estimate.objects }}</dd>
+    <dt>Bytes to read</dt><dd>{{ "{:,}".format(estimate.bytes) }}</dd>
+  </dl>
+  <div class="scroll mt">
+    <table>
+      <thead><tr><th>Connection</th><th class="num">Objects</th><th class="num">Bytes</th>
+        <th class="num">Pruned by window</th></tr></thead>
+      <tbody>
+        {% for row in estimate.connections %}
+        <tr>
+          <td class="mono">{{ row.connection_id }}</td>
+          <td class="num">{{ row.objects }}</td>
+          <td class="num">{{ "{:,}".format(row.bytes) }}</td>
+          <td class="num">{{ row.pruned_by_window }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% for row in estimate.connections %}{% for f in row.failures %}
+    <div class="note bad mt"><strong>Cannot list</strong>
+      <span class="mono small">{{ f.uri }}</span> — {{ f.error }}<br>
+      A location that cannot be listed hides an unknown volume, so a run over it
+      is marked incomplete rather than gated on a percentage (SPEC.md §6.1).</div>
+  {% endfor %}{% endfor %}
+  {% if estimate.objects == 0 %}
+    <div class="note warn mt"><strong>Nothing to read</strong>
+      No objects matched this window. "No traffic" and "no logs delivered" look
+      identical from here (SPEC.md §15.9).</div>
+  {% endif %}
+</div>
+{% endif %}

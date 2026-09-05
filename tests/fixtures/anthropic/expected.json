@@ -1,0 +1,30 @@
+{
+  "window": "2026-08-01..2026-08-31",
+  "timezone": "UTC",
+  "raw_lines": 14,
+  "records_outside_window": 1,
+  "duplicates_collapsed": 1,
+  "retry_attempts_linked": 4,
+  "records": 12,
+  "status_counts": {
+    "ok": 8,
+    "error_unbilled": 1,
+    "error_billed": 1,
+    "truncated": 1,
+    "cancelled": 1
+  },
+  "fidelity_counts": { "A": 1, "B": 1, "C": 10 },
+  "slice_fidelity": "A",
+  "usage_totals": {
+    "input_tokens": 6700,
+    "output_tokens": 6086,
+    "cache_read_tokens": 8000,
+    "cache_write_5m_tokens": 4200,
+    "cache_write_1h_tokens": 0,
+    "cache_write_unknown_ttl_tokens": 3000
+  },
+  "ttl_class_unknown_records": 1,
+  "tier_a_segment_count": 4,
+  "tier_b_segment_count": 2,
+  "redacted_values": ["analyst@acme.example", "ops@acme.example"]
+}

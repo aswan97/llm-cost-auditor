@@ -4,7 +4,20 @@ A self-hosted platform that ingests LLM provider API logs and produces a ranked,
 
 It runs on your own infrastructure, two ways over one engine: a **local web app** for analysts and engineers to run audits and browse findings, and a **CLI** for automation and CI gates. A run started in one is visible in the other.
 
-> **Status: design phase.** [SPEC.md](SPEC.md) is complete; no code has been written yet. The interfaces below describe the intended v1, not working software.
+> **Status: ingest stage.** [SPEC.md](SPEC.md) describes the finished v1. What is
+> **built today** is the first slice of it: the local-files connector, the decode
+> layer, the Anthropic source adapter, retry/duplicate-delivery classification,
+> the run store, the coverage panel, and the CLI and web app that render a run.
+>
+> There is **no pricing engine and there are no analyzers yet**, so nothing in
+> the tool produces a dollar figure or a finding. The pages and commands below
+> that describe savings, reports, and verification are the intended v1, not
+> working software. Everything the app displays today is read from a run record
+> on disk — there is no mock data anywhere, which is deliberate: a page that
+> renders plausible fake numbers is the exact failure this project exists to
+> prevent.
+>
+> Try it: [Running it](#running-it).
 
 ## Why
 
@@ -43,7 +56,45 @@ Objects are streamed rather than downloaded, the audit window prunes the listing
 
 **What** (source adapters): Anthropic, OpenAI, and cloud brokers (AWS Bedrock, Google Vertex AI, Azure AI Foundry) — each with its own price sheet, log shape, and reserved-capacity handling. Gateway logs (LiteLLM, OpenRouter, Helicone) are planned.
 
+## Running it
+
+Docker is the reference environment — it pins Python 3.12, mounts the sample
+logs, and keeps the run store in a named volume so a run started at a terminal
+shows up in the browser and vice versa.
+
+```bash
+# Point the tool at the sample logs. The source scope is terminal-only: it is
+# the boundary that makes an unauthenticated local server safe, so there is no
+# API or UI route that can widen it.
+docker compose run --rm cli sources add /logs
+docker compose run --rm cli connections add sample --uri /logs/anthropic --source anthropic
+docker compose run --rm cli connections test sample
+docker compose run --rm cli connections peek sample -n 10
+
+# Ingest a month. Exit 0 = complete, 2 = coverage incomplete, 1 = failed.
+docker compose run --rm cli ingest sample --window 2026-08-01..2026-08-31
+
+# Browse the same runs at http://127.0.0.1:8787
+docker compose up app
+```
+
+The container binds `0.0.0.0` because loopback inside a container is
+unreachable from outside it; compose publishes it on the host's `127.0.0.1`
+only, so the loopback-only posture holds end to end.
+
+Without Docker: `pip install -e ".[web]"` and drop the `docker compose run --rm`
+prefix (`llm-cost-auditor sources add ./examples/logs`, and so on).
+
+Run the gates the way CI does:
+
+```bash
+docker compose run --rm test     # ruff, mypy, pytest with the coverage floor
+```
+
 ## Intended usage
+
+*The commands in this section describe the finished v1. Only `sources`,
+`connections`, `ingest`, `runs`, and `serve` exist today.*
 
 ### The app
 

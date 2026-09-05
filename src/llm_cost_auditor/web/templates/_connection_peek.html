@@ -1,0 +1,50 @@
+<div class="panel">
+  {% if error %}
+    <h3>Preview failed</h3>
+    <div class="note bad">{{ error }}</div>
+  {% else %}
+  <h3>Preview — {{ connection.id }}</h3>
+  <dl class="facts">
+    <dt>Detected</dt>
+    <dd>{{ preview.compression }} / {{ preview.container }} (by {{ preview.detected_by }})</dd>
+    <dt>Source</dt><dd>{{ connection.source }}</dd>
+    <dt>Fidelity tier</dt>
+    <dd>{{ preview.fidelity }} — per-record mix {{ preview.fidelity_counts }}</dd>
+    <dt>Objects read</dt><dd>{{ preview.objects }}</dd>
+    <dt>Observed range</dt>
+    <dd>{{ preview.observed_start }} .. {{ preview.observed_end }} (UTC)</dd>
+  </dl>
+  {% if preview.records %}
+  <div class="scroll mt">
+    <table>
+      <thead><tr><th>Start (UTC)</th><th>Request</th><th>Model</th><th>Status</th>
+        <th class="num">In</th><th class="num">Out</th><th class="num">Cache read</th>
+        <th class="num">Cache write</th></tr></thead>
+      <tbody>
+      {% for r in preview.records %}
+        <tr>
+          <td class="mono small">{{ r.start_time.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+          <td class="mono small">{{ r.request_id }}</td>
+          <td class="small">{{ r.model }}</td>
+          <td><span class="pill {{ 'ok' if r.status.value == 'ok' else 'bad' }}">{{ r.status.value }}</span></td>
+          <td class="num">{{ r.usage.input_tokens }}</td>
+          <td class="num">{{ r.usage.output_tokens }}</td>
+          <td class="num">{{ r.usage.cache_read_tokens }}</td>
+          <td class="num">{{ r.usage.cache_write_tokens }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted mt">
+    Token counts are as the log reported them. Nothing here is priced — the price
+    catalog and the pricing module are the next slice (SPEC.md §7).
+  </p>
+  {% else %}
+    <p class="muted">No records decoded.</p>
+  {% endif %}
+  {% for problem in preview.problems %}
+    <div class="note bad mt"><span class="mono small">{{ problem }}</span></div>
+  {% endfor %}
+  {% endif %}
+</div>
