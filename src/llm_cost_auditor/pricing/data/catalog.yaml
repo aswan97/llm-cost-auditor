@@ -94,11 +94,16 @@ rows:
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
-  # NOTE: cache reads here are 0.025x input, not the 0.1x every other Anthropic
-  # row uses. All three feeds agree on the absolute figure ($0.25/MTok against a
-  # $10.00/MTok input rate), so this is data rather than one source's typo — but
-  # it breaks the family pattern, so it is the first row to re-check against the
-  # provider page rather than one to assume is a transcription slip.
+  # Cache reads here are 0.025x input, not the 0.1x every other Anthropic row
+  # uses. That is correct and deliberate, not a transcription slip: $0.25/MTok
+  # against a $10.00/MTok input rate, agreed by all three feeds and confirmed
+  # against the published figure on 2026-09-05.
+  #
+  # Left as a comment because the value looks wrong at a glance, and the obvious
+  # "fix" — making it 0.1 like its siblings — would quadruple the cache-read
+  # cost of every Fable 5.1 request and make prefix caching look four times less
+  # worthwhile than it is. `test_fable_5_1_cache_reads_are_deliberately_off_pattern`
+  # fails if anyone tidies it.
   - model: claude-fable-5-1
     provider: anthropic
     effective_from: 2026-09-01

@@ -297,3 +297,23 @@ def test_a_long_context_request_is_partially_priced_not_underpriced() -> None:
 
     small = big.model_copy(update={"usage": Usage(input_tokens=1000, output_tokens=100)})
     assert pricing.cost_of(small).is_complete is True
+
+
+def test_fable_5_1_cache_reads_are_deliberately_off_pattern() -> None:
+    """$0.25/MTok, where the rest of the Anthropic line reads at 0.1x input.
+
+    Pinned because the value looks like a mistake and the obvious tidy-up —
+    making it 0.1 like its siblings — would quadruple the cache-read cost of
+    every Fable 5.1 request, and understate what prefix caching is worth on it
+    by the same factor. Confirmed against the published rate, so a future
+    disagreement here is a real price change, not a typo to correct.
+    """
+    at = datetime(2026, 9, 5, tzinfo=UTC)
+    rate = pricing.rate("anthropic", "claude-fable-5-1", at=at)
+    mult = pricing.multiplier("anthropic", "claude-fable-5-1", "cache_read", at=at)
+    assert rate.input_usd_micros_per_mtok == 10_000_000
+    assert mult == Decimal("0.025")
+    assert Decimal(rate.input_usd_micros_per_mtok) * mult == 250_000
+
+    sibling = pricing.multiplier("anthropic", "claude-fable-5", "cache_read", at=at)
+    assert sibling == Decimal("0.1"), "the rest of the line is unchanged"
