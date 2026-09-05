@@ -1,0 +1,55 @@
+# Run and test the platform in Docker.
+#
+#   docker compose run --rm test            # lint, types, and the test suite
+#   docker compose run --rm cli <args...>   # any CLI command
+#   docker compose up app                   # the web app on http://127.0.0.1:8787
+#
+# The workspace is a named volume so runs survive a restart; the sample logs and
+# the source tree are bind-mounted read-only.
+
+services:
+  app:
+    build: { context: ., target: base }
+    # Published on the host's loopback only. The container binds 0.0.0.0
+    # because loopback inside a container is unreachable from outside it; the
+    # port mapping is what keeps the §12 posture true on the host.
+    ports: ["127.0.0.1:8787:8787"]
+    volumes:
+      - workspace:/workspace
+      - ./examples/logs:/logs:ro
+      - ./src:/app/src:ro
+    environment:
+      LCA_WORKSPACE: /workspace
+
+  # One-off CLI. Shares the workspace volume with `app`, so a run started here
+  # shows up in the browser and vice versa (SPEC.md §13).
+  cli:
+    build: { context: ., target: base }
+    volumes:
+      - workspace:/workspace
+      - ./examples/logs:/logs:ro
+      - ./src:/app/src:ro
+    entrypoint: ["llm-cost-auditor"]
+    command: ["runs", "list"]
+    environment:
+      LCA_WORKSPACE: /workspace
+
+  test:
+    build: { context: ., target: dev }
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./scripts:/app/scripts:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        ruff check .
+        ruff format --check .
+        mypy
+        pytest -q --cov=llm_cost_auditor --cov-report=term-missing --cov-fail-under=80
+
+volumes:
+  workspace:
