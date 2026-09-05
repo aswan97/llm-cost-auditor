@@ -36,8 +36,10 @@
 {% include "_live.html" %}
 
 {# Loaded rather than inlined: pricing walks every record, so the page renders
-   its manifest and coverage first and the total arrives when it is ready. #}
-<div hx-get="/runs/{{ run.run_id }}/cost" hx-trigger="load" hx-swap="outerHTML">
+   its manifest and coverage first and the total arrives when it is ready. The
+   fragment takes over its own refreshing from here — while the run is still
+   going it polls itself, and stops once there is a final number. #}
+<div id="cost" hx-get="/runs/{{ run.run_id }}/cost" hx-trigger="load" hx-swap="outerHTML">
   <div class="panel muted">Pricing records…</div>
 </div>
 

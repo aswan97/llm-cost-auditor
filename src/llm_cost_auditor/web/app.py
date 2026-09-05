@@ -173,15 +173,14 @@ def create_app(workspace: Path) -> FastAPI:
             events=list(runs.read_events(run_id)),
         )
 
-    def _baseline(run_id: str) -> baseline.Baseline | None:
+    def _baseline(record: RunRecord) -> baseline.Baseline | None:
         """Price a run's stored records, or `None` if there are none to price.
 
         Computed on read rather than stored: pricing is read-only over an
         existing ingest (§11.1), and a cached total is a total that can go stale
         against the catalog without anything saying so.
         """
-        _lookup(runs, run_id)
-        store = RecordStore(runs.artifact_path(run_id, RECORDS_PARQUET))
+        store = RecordStore(runs.artifact_path(record.run_id, RECORDS_PARQUET))
         if not store.exists():
             return None
         return baseline.compute(store.iter_records())
@@ -193,8 +192,20 @@ def create_app(workspace: Path) -> FastAPI:
         A fragment rather than part of the page body because pricing walks every
         record: the run page stays fast, and a large run shows its coverage and
         manifest while this is still counting.
+
+        The fragment carries its own poll while the run is unfinished and drops
+        it once the run is terminal, the same way the live panel does. Starting a
+        run redirects here immediately, so without that the first render — taken
+        before any record exists — would be the only one, and the total would
+        appear only to somebody who navigated back to the run later.
         """
-        return page(request, "_cost.html", run_id=run_id, baseline=_baseline(run_id))
+        record = _lookup(runs, run_id)
+        return page(
+            request,
+            "_cost.html",
+            run=record,
+            baseline=None if not record.status.terminal else _baseline(record),
+        )
 
     @application.get("/api/runs/{run_id}/cost")
     def api_run_cost(run_id: str) -> dict[str, Any]:
@@ -203,8 +214,20 @@ def create_app(workspace: Path) -> FastAPI:
         Every monetary field is an integer of micro-USD named `_usd_micros`
         (§6.4) — the formatted dollar strings live only in the HTML, and nothing
         reads one back.
+
+        A run still in progress is a 409 rather than a 404: the figures do not
+        exist *yet*, which a caller should retry, as against records that are
+        gone, which it should not.
         """
-        result = _baseline(run_id)
+        record = _lookup(runs, run_id)
+        if not record.status.terminal:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"run {run_id} is {record.status.value}; nothing is priced until it finishes"
+                ),
+            )
+        result = _baseline(record)
         if result is None:
             raise HTTPException(
                 status_code=404,

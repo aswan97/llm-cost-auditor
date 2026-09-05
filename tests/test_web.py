@@ -396,3 +396,64 @@ def test_the_cost_panel_is_not_inlined_into_the_run_page(client: Any) -> None:
     body = client.get(f"/runs/{run_id}").text
     assert f'hx-get="/runs/{run_id}/cost"' in body
     assert "Baseline spend" not in body, "the panel arrives as a fragment, not inline"
+
+
+# --- the panel has to catch up with a run that was not finished yet ------------
+
+
+def test_a_panel_fetched_before_the_run_finishes_keeps_refreshing(
+    client: Any, workspace: Path
+) -> None:
+    """The reported bug: start a run, land on its page, never see a total.
+
+    Starting a run redirects to the run page immediately, so the first render of
+    this fragment happens while the run is still queued. If that render carried
+    no refresh, it would be the only one, and spend would appear only to someone
+    who navigated back to the run later.
+    """
+    from llm_cost_auditor.run_store import RunRecord, RunRequest, RunStatus, RunStore
+
+    runs = RunStore(workspace)
+    record: RunRecord = runs.create(RunRequest(connection_ids=["local-anthropic"]))
+    assert record.status is RunStatus.QUEUED
+
+    body = client.get(f"/runs/{record.run_id}/cost").text
+    assert f'hx-get="/runs/{record.run_id}/cost"' in body, "an unfinished run must re-poll"
+    assert 'hx-trigger="every 2s"' in body
+
+
+def test_an_unfinished_run_is_not_told_its_records_were_purged(
+    client: Any, workspace: Path
+) -> None:
+    """ "Nothing to price" describes a run that is working perfectly as a failure."""
+    from llm_cost_auditor.run_store import RunRequest, RunStore
+
+    record = RunStore(workspace).create(RunRequest(connection_ids=["local-anthropic"]))
+    body = client.get(f"/runs/{record.run_id}/cost").text
+    assert "purged" not in body
+    assert "Waiting for" in body
+    assert "queued" in body
+
+
+def test_a_finished_panel_stops_polling(client: Any) -> None:
+    """A terminal run has a final number; re-fetching it forever is waste."""
+    run_id = completed_run(client)
+    body = client.get(f"/runs/{run_id}/cost").text
+    assert 'hx-trigger="every 2s"' not in body
+    assert "Baseline spend" in body
+    assert re.search(r"\$\s?\d", body)
+
+
+def test_the_api_separates_not_yet_from_not_there(client: Any, workspace: Path) -> None:
+    """409 is retryable and 404 is not, and a caller needs to tell them apart."""
+    from llm_cost_auditor.run_store import RECORDS_PARQUET, RunRequest, RunStore
+
+    runs = RunStore(workspace)
+    pending = runs.create(RunRequest(connection_ids=["local-anthropic"]))
+    in_progress = client.get(f"/api/runs/{pending.run_id}/cost")
+    assert in_progress.status_code == 409
+    assert "until it finishes" in in_progress.json()["detail"]
+
+    run_id = completed_run(client)
+    runs.artifact_path(run_id, RECORDS_PARQUET).unlink()
+    assert client.get(f"/api/runs/{run_id}/cost").status_code == 404

@@ -1,11 +1,28 @@
 {# Baseline spend (SPEC.md §11.1), rendered from the same `baseline.compute()`
    the CLI prints. Every figure here is formatted by `format_usd` on the model
    itself — no arithmetic in this template, and no second opinion about
-   rounding. #}
+   rounding.
+
+   Polls itself while the run is unfinished and stops once it is terminal, the
+   same shape as _live.html. Starting a run lands on the run page before any
+   record exists, so a fragment that rendered once would show "nothing to price"
+   for the whole run and never correct itself. #}
+<div id="cost"
+     {% if not run.status.terminal %}
+     hx-get="/runs/{{ run.run_id }}/cost" hx-trigger="every 2s" hx-swap="outerHTML"
+     {% endif %}>
 <div class="panel">
   <h3>Baseline spend</h3>
 
-  {% if baseline is none %}
+  {% if not run.status.terminal %}
+    {# Not an absence of data — an absence of data *yet*. Saying "nothing to
+       price" here would describe a run that is working perfectly as a failure. #}
+    <p class="muted">
+      Waiting for <span class="mono">{{ run.stage.value if run.stage else 'ingest' }}</span>
+      to finish — this run is {{ run.status.value }}. Spend is priced from the
+      records once they are written.
+    </p>
+  {% elif baseline is none %}
     <p class="muted">
       This run has no <code>records.parquet</code> — purged, or ingest did not
       complete. Nothing to price.
@@ -74,7 +91,7 @@
   {% endif %}
 
   <div class="actions mt">
-    <a class="btn" href="/api/runs/{{ run_id }}/cost">cost.json</a>
+    <a class="btn" href="/api/runs/{{ run.run_id }}/cost">cost.json</a>
   </div>
 
   <p class="small muted mt">
@@ -82,4 +99,5 @@
     account with negotiated terms is priced high here.
   </p>
   {% endif %}
+</div>
 </div>
