@@ -53,6 +53,34 @@ the merge if it is unchanged or undocumented here.
   in the coverage panel (SPEC.md §6.6, §15.9). Neither is gated — every byte was read —
   but "no traffic" and "the window missed the data" are no longer the same silence.
 
+- **The pricing engine** (SPEC.md §7.1). A versioned price table as data, with `rate()`,
+  `multiplier()` and `cost_of()` as the only way anything reads it; integer micro-USD end
+  to end, `Decimal` only at the parse boundary, and one half-even rounding per token class
+  so composed discounts (batch on cache) land on a single answer. Rows are memoized per
+  `(provider, model, timestamp)` and the table is never parsed at import — asserted by a
+  test, not by intent.
+
+  It refuses more than it computes. An unknown model, a timestamp no row covers, an absent
+  multiplier, image tokens a per-MTok row cannot value, and a request above an unmodelled
+  long-context tier each produce a stated gap rather than a number. `runs cost` reports
+  baseline spend with those exclusions named, and tells apart the two ways a price can be
+  missing — an unknown model and a missing historical row need different fixes.
+
+- **Seeded catalog for the Anthropic and OpenAI frontier** — 15 rows, every value
+  cross-checked across three independent public feeds (LiteLLM, models.dev, OpenRouter)
+  and matched exactly on everything all three carry.
+
+- **`prices list` and `prices check`.** The check compares the bundled table against a
+  public feed and prints what moved, exiting non-zero so a maintenance job can gate on it.
+  It never writes a rate: auto-adopting a feed would stamp `last_verified` to say a human
+  had looked, and one upstream typo would reprice every finding at once. It also names
+  what no feed can verify (batch multipliers) rather than skipping it silently.
+
+- **Hand-computed pricing fixtures** in `tests/fixtures/pricing/`, with a test catalog of
+  round rates and a README deriving all twelve expected values by hand — cached requests,
+  batch, batch composed with cache, billed failures, a retry pair, a price boundary, an
+  unknown TTL class, multimodal, and the half-even rounding case. Asserted exactly.
+
 - **Hand-computed ingest fixtures** in `tests/fixtures/anthropic/`, with the arithmetic for
   every expected value derived line by line in a README alongside them, asserted exactly.
 

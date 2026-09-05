@@ -496,7 +496,19 @@ All prices live in a **single versioned price table** — data, never code. It i
 
 **Staleness is surfaced, never silent.** Every report states the catalog version and the oldest `last_verified` date among the rows actually used. Rows older than a configurable threshold (default 90 days) raise a warning on the affected findings; rows with no matching entry for a model produce a *missing price* coverage entry rather than a guessed number — an unpriced model is excluded from savings math and reported as such.
 
-**Loaded on demand, not per session.** The table is not parsed at import or CLI startup. The pricing module lazily loads and memoizes only the rows it is asked for — keyed by `(provider, model, timestamp)` — on first lookup, so a run that touches four models never reads the rest of the catalog. `refresh-prices` is an explicit, separate command that updates the bundled table and bumps `last_verified`; a normal `audit` run never fetches anything.
+**Loaded on demand, not per session.** The table is not parsed at import or CLI startup. The pricing module lazily loads and memoizes only the rows it is asked for — keyed by `(provider, model, timestamp)` — on first lookup, so a run that touches four models never reads the rest of the catalog. A normal `audit` run never fetches anything.
+
+**Refresh reports drift; it never adopts it.** `prices check` fetches a public pricing feed, derives the same figures our rows hold, and prints where the two disagree, exiting non-zero so a maintenance job can gate on it. It does not write a rate. Auto-adopting a feed would stamp `last_verified` fresh — asserting that a human had checked the provider's page when none had — and a single upstream typo would reprice every finding in every report at once, confidently and invisibly. A human resolves each disagreement against the row's own `source_url` and edits the catalog by hand.
+
+Seeding a row works the same way: transcribe only what more than one independent feed agrees on, and treat a lone source as unverified. The rows shipped in v1 were cross-checked across three (LiteLLM, models.dev, OpenRouter) and matched exactly on every value all three carry.
+
+**Three dimensions the public feeds cannot supply**, each stated rather than guessed:
+
+- **No feed carries history.** They publish today's list, so `effective_from` / `effective_to` is ours to maintain, accumulated as changes are observed. A request whose timestamp falls outside every row for its model is *unpriced and reported*, never repriced at today's rate.
+- **No feed carries batch multipliers** for first-party Anthropic or OpenAI rows. `prices check` reports them as unverifiable rather than silently skipping them.
+- **Long-context tiers are not modelled.** Some models bill a higher rate above a context threshold. A row may declare `long_context_threshold_tokens`, which exists only to *refuse*: a request above it is reported as partially priced rather than charged the base rate, which would understate the largest requests by the width of the tier. Modelling the tiers properly is a schema change and waits until more than one model needs it.
+
+**`null` is never zero.** A multiplier absent from a row means the provider does not sell that token class — OpenAI's prompt caching is automatic and has no write to bill — and asking for it is an error. Defaulting it to zero would price a whole token class at nothing and read as a saving.
 
 **Consumption rule.** Analyzers never see raw numbers. They call `pricing.rate(provider, model, at=timestamp)` and `pricing.multiplier(...)`, so a price change, a new broker, or a new discount class never requires touching analyzer code.
 

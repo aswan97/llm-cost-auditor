@@ -23,12 +23,14 @@ from typing import Annotated, Any
 import typer
 
 from . import config as config_module
-from . import engine
+from . import engine, pricing
 from . import window as window_module
 from .config import DEFAULT_WORKSPACE, Connection, WorkspaceConfig, check_in_scope
-from .errors import AuditorError
+from .errors import AuditorError, MissingPriceError
 from .ingest import decode, local
 from .ingest.adapters import anthropic
+from .pricing import catalog as load_catalog
+from .pricing import refresh as price_refresh
 from .record_store import RecordStore
 from .records import RequestRecord
 from .run_store import RECORDS_PARQUET, RunRequest, RunStatus, RunStore, Stage
@@ -42,9 +44,11 @@ app = typer.Typer(
 sources_app = typer.Typer(help="The source scope (SPEC.md §6.1) — terminal only.")
 connections_app = typer.Typer(help="Saved log sources (SPEC.md §6.6).")
 runs_app = typer.Typer(help="The run store (SPEC.md §5.3).")
+prices_app = typer.Typer(help="The price table (SPEC.md §7.1).")
 app.add_typer(sources_app, name="sources")
 app.add_typer(connections_app, name="connections")
 app.add_typer(runs_app, name="runs")
+app.add_typer(prices_app, name="prices")
 
 # `LCA_WORKSPACE` exists so a container (or a shell profile) can pin the
 # workspace once instead of repeating it on every command. It is a default, not
@@ -62,6 +66,11 @@ WorkspaceOption = Annotated[
 
 def _out(message: str = "") -> None:
     typer.echo(message)
+
+
+def _usd(micros: int) -> str:
+    """Format uUSD as dollars, once, at the edge. Never parsed back (AGENTS.md)."""
+    return f"${micros / 1_000_000:,.2f}"
 
 
 def _fail(message: str) -> None:
@@ -550,6 +559,167 @@ def _print_run(record: Any, runs: RunStore) -> None:
 
 
 # --- serve --------------------------------------------------------------------
+
+
+@runs_app.command("cost")
+def runs_cost(
+    run_id: Annotated[str, typer.Argument()],
+    workspace: WorkspaceOption = DEFAULT_WORKSPACE,
+) -> None:
+    """Baseline spend for a run's records, at public list prices (SPEC.md §11.1).
+
+    Read-only over a completed ingest — it starts no stage and writes nothing.
+    Records whose model has no catalog row are counted and named rather than
+    priced at zero, so the total always says what it does not include.
+    """
+    runs = RunStore(workspace)
+    store = RecordStore(runs.artifact_path(run_id, RECORDS_PARQUET))
+    if not store.exists():
+        _fail(f"run {run_id} has no records.parquet (purged, or ingest did not complete)")
+
+    total = 0
+    exposure = 0
+    priced = 0
+    by_model: dict[str, list[int]] = {}
+    unpriced_models: dict[tuple[str, str], int] = {}
+    partial: dict[str, int] = {}
+    oldest: Any = None
+
+    for record in store.iter_records():
+        key = f"{record.provider}/{record.model}"
+        try:
+            cost = pricing.cost_of(record)
+        except MissingPriceError as exc:
+            unpriced_models[(key, exc.reason)] = unpriced_models.get((key, exc.reason), 0) + 1
+            continue
+        priced += 1
+        total += cost.total_usd_micros
+        exposure += cost.ttl_unknown_exposure_usd_micros
+        bucket = by_model.setdefault(key, [0, 0])
+        bucket[0] += cost.total_usd_micros
+        bucket[1] += 1
+        for name in cost.unpriced_token_classes:
+            partial[name] = partial.get(name, 0) + 1
+        oldest = cost.last_verified if oldest is None else min(oldest, cost.last_verified)
+
+    if not priced and not unpriced_models:
+        _fail(f"run {run_id} has no records to price.")
+
+    _out(f"Baseline spend — run {run_id}")
+    _out(f"catalog {load_catalog().version}, oldest verification {oldest}")
+    _out()
+    _out(f"  {'model':<34}{'records':>9}{'spend':>16}")
+    for key, (spend, count) in sorted(by_model.items(), key=lambda kv: -kv[1][0]):
+        _out(f"  {key:<34}{count:>9}{_usd(spend):>16}")
+    _out(f"  {'':<34}{priced:>9}{_usd(total):>16}")
+    _out()
+
+    if exposure:
+        _out(
+            f"~ cache writes with an unknown TTL class are billed at the lowest premium; "
+            f"up to {_usd(exposure)} more is possible (SPEC.md §6.2)."
+        )
+    for name, count in sorted(partial.items()):
+        _out(
+            f"~ {count} record(s) carry {name}, which this catalog cannot price. "
+            f"The total above is a lower bound."
+        )
+    for (key, reason), count in sorted(unpriced_models.items()):
+        if reason == MissingPriceError.UNKNOWN_MODEL:
+            _out(
+                f"! {count} record(s) on {key} — no catalog row for that model at all. "
+                f"Excluded entirely."
+            )
+        else:
+            _out(
+                f"! {count} record(s) on {key} — the model is priced, but no row covers "
+                f"their timestamps. A historical rate is missing, not the model. Excluded."
+            )
+    if not exposure and not partial and not unpriced_models:
+        _out("Every record was priced, with no unpriced dimensions.")
+    _out()
+    _out("Public list prices. No commercial overlay is applied (SPEC.md §7.2), so an")
+    _out("account with negotiated terms is priced high here.")
+
+
+# --- prices (SPEC.md §7.1) ----------------------------------------------------
+
+
+@prices_app.command("list")
+def prices_list(
+    provider: Annotated[
+        str | None, typer.Option("--provider", help="Only rows for this provider.")
+    ] = None,
+) -> None:
+    """Show the bundled price table, with the provenance of every row."""
+    table = load_catalog()
+    rows = [r for r in table.rows if provider is None or r.provider == provider]
+    if not rows:
+        _fail(f"no rows for provider {provider!r} in catalog {table.version}.")
+
+    _out(
+        f"catalog {table.version} — {len(rows)} row(s), oldest verification "
+        f"{table.oldest_verification()}"
+    )
+    _out()
+    for row in sorted(rows, key=lambda r: (r.provider, r.model, r.effective_from)):
+        window = f"{row.effective_from}..{row.effective_to or 'open'}"
+        _out(f"  {row.provider}/{row.model}")
+        _out(f"    {window}   in ${row.input}/MTok   out ${row.output}/MTok   {row.currency}")
+        _out(f"    verified {row.last_verified}   {row.source_url}")
+    _out()
+    _out("Rates are public list prices. A commercial overlay (SPEC.md §7.2) is not")
+    _out("applied yet, so an account with negotiated terms is priced high here.")
+
+
+@prices_app.command("check")
+def prices_check(
+    url: Annotated[
+        str, typer.Option("--url", help="The feed to compare against.")
+    ] = price_refresh.FEED_URL,
+) -> None:
+    """Compare the bundled table against a public feed and report what moved.
+
+    This is the only command in the tool that reaches the network for pricing,
+    and it never writes a rate: it prints disagreements for a human to check
+    against each row's `source_url`. Auto-adopting a feed would stamp
+    `last_verified` fresh to say a human had looked, which would be false.
+
+    Exits 1 when the two disagree, so a maintenance job can gate on it.
+    """
+    table = load_catalog()
+    try:
+        feed = price_refresh.fetch(url)
+    except AuditorError as exc:
+        _fail(str(exc))
+    report = price_refresh.check(table, feed)
+
+    _out(f"catalog {report.catalog_version} vs {report.feed_name}")
+    _out(f"{report.rows_checked} in-force row(s) compared.")
+    _out()
+
+    if report.unmatched:
+        _out(f"~ {len(report.unmatched)} row(s) the feed does not carry — check by hand:")
+        for name in report.unmatched:
+            _out(f"    {name}")
+        _out()
+
+    if report.unverifiable:
+        _out(f"~ {len(report.unverifiable)} value(s) no feed carries at all:")
+        for name in sorted(set(report.unverifiable)):
+            _out(f"    {name}")
+        _out()
+
+    if report.clean:
+        _out("No drift. Every comparable value matches.")
+        return
+
+    _out(f"! {len(report.drifts)} disagreement(s). Check each against the provider page,")
+    _out("  then edit the catalog by hand and bump `last_verified`:")
+    for drift in report.drifts:
+        _out(f"    {drift.describe()}")
+        _out(f"      {drift.source_url}")
+    raise typer.Exit(code=1)
 
 
 @app.command("serve")
