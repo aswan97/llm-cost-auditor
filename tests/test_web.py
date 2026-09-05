@@ -55,12 +55,16 @@ def test_every_page_states_what_this_build_does_not_do(client: Any) -> None:
     """A styled dashboard reads as fact; the honest version says what is missing (§15.6)."""
     for path in ("/", "/connections", "/runs/new"):
         body = " ".join(client.get(path).text.lower().split())
-        assert "no pricing engine and there are no analyzers yet" in body
-        assert "no page here shows a dollar figure or a finding" in body
+        assert "there are no analyzers yet" in body
+        assert "no page here shows a finding, a saving, or a recommendation" in body
 
 
-def test_no_page_shows_a_dollar_figure(client: Any) -> None:
-    """Nothing is priced yet, so a `$1,234.56` anywhere would be invented."""
+def test_no_dollar_figure_appears_where_nothing_was_priced(client: Any) -> None:
+    """Spend belongs on a run that has records, and nowhere else.
+
+    A dollar amount on the connections page or the new-run form would not be
+    read from anything — it would be decoration that looks like a measurement.
+    """
     for path in ("/", "/connections", "/runs/new"):
         body = client.get(path).text
         assert not re.search(r"\$\s?\d", body), f"{path} renders a dollar amount"
@@ -298,3 +302,97 @@ def test_unknown_run_is_a_404(client: Any) -> None:
 def test_run_id_traversal_is_refused(client: Any) -> None:
     response = client.get("/api/runs/..%2F..%2Fetc")
     assert response.status_code in (404, 400)
+
+
+# --- baseline spend: two surfaces, one arithmetic (§11.1, §13.1) --------------
+
+
+def completed_run(client: Any) -> str:
+    """Start a run through the app and wait for it, the way a user would."""
+    response = client.post(
+        "/runs/start",
+        headers=token(client),
+        data={"connection_ids": ["local-anthropic"], "csrf_token": client.cookies["lca_csrf"]},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303, response.text
+    run_id = response.headers["location"].rsplit("/", 1)[-1]
+    wait_for_terminal(client, run_id)
+    return run_id
+
+
+def test_the_run_page_shows_what_the_traffic_cost(client: Any) -> None:
+    run_id = completed_run(client)
+    body = client.get(f"/runs/{run_id}/cost").text
+    assert "Baseline spend" in body
+    assert re.search(r"\$\s?\d", body), "a priced run should show a dollar figure"
+    assert "No commercial overlay is applied" in body
+
+
+def test_the_app_and_the_cli_agree_figure_by_figure(client: Any, workspace: Path) -> None:
+    """The check AGENTS.md asks for: two surfaces over one run record.
+
+    Both render `baseline.compute()`, so this asserts they are wired to the same
+    result rather than that two implementations happen to agree today. A
+    discrepancy here is a defect by definition, not a rounding difference.
+    """
+    run_id = completed_run(client)
+
+    from llm_cost_auditor import baseline
+    from llm_cost_auditor.record_store import RecordStore
+    from llm_cost_auditor.run_store import RECORDS_PARQUET, RunStore
+
+    store = RecordStore(RunStore(workspace).artifact_path(run_id, RECORDS_PARQUET))
+    direct = baseline.compute(store.iter_records())
+
+    api = client.get(f"/api/runs/{run_id}/cost").json()
+    assert api["total_usd_micros"] == direct.total_usd_micros
+    assert api["priced_records"] == direct.priced_records
+    assert [(m["model"], m["spend_usd_micros"]) for m in api["by_model"]] == [
+        (m.model, m.spend_usd_micros) for m in direct.by_model
+    ]
+
+    html = client.get(f"/runs/{run_id}/cost").text
+    assert direct.total in html, "the rendered total must be the computed one"
+    for row in direct.by_model:
+        assert row.spend in html
+        assert row.label in html
+
+
+def test_money_crosses_the_api_as_integer_micros_never_a_float(client: Any) -> None:
+    """A JSON float would defeat the exact-equality rule on any round trip (§6.4)."""
+    run_id = completed_run(client)
+    api = client.get(f"/api/runs/{run_id}/cost").json()
+    monetary = [k for k in api if k.endswith("_usd_micros")]
+    assert monetary, "monetary fields must carry the _usd_micros suffix"
+    for key in monetary:
+        assert isinstance(api[key], int), f"{key} is {type(api[key])}"
+    for row in api["by_model"]:
+        assert isinstance(row["spend_usd_micros"], int)
+    assert not any(k.endswith("_usd") for k in api), "no bare dollar field on the wire"
+
+
+def test_a_run_with_no_records_says_so_rather_than_showing_zero(
+    client: Any, workspace: Path
+) -> None:
+    """`$0.00` and "nothing to price" look identical in a table and are not.
+
+    A purged run must read as absent data, never as a run that cost nothing.
+    """
+    from llm_cost_auditor.run_store import RECORDS_PARQUET, RunStore
+
+    run_id = completed_run(client)
+    RunStore(workspace).artifact_path(run_id, RECORDS_PARQUET).unlink()
+
+    body = client.get(f"/runs/{run_id}/cost").text
+    assert "Nothing to price" in body
+    assert not re.search(r"\$\s?0\.00", body), "absence must not render as zero"
+    assert client.get(f"/api/runs/{run_id}/cost").status_code == 404
+
+
+def test_the_cost_panel_is_not_inlined_into_the_run_page(client: Any) -> None:
+    """Pricing walks every record, so the page must not wait on it."""
+    run_id = completed_run(client)
+    body = client.get(f"/runs/{run_id}").text
+    assert f'hx-get="/runs/{run_id}/cost"' in body
+    assert "Baseline spend" not in body, "the panel arrives as a fragment, not inline"

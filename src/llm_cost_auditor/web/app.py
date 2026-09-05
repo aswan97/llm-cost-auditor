@@ -5,11 +5,16 @@ command first, and no analysis logic lives in a route handler, a template, or
 JavaScript. Routes read the run store and hand run records to templates; the
 work happens in the engine.
 
-**What this build renders is what ingest produces** — runs, connections, the
-source scope, live progress, the manifest, and the coverage panel. There are no
-findings pages and no dollar figures, because no analyzer exists yet and a page
-that renders plausible fake numbers is the exact failure this project is trying
-to avoid (AGENTS.md).
+**What this build renders is what the engine produces** — runs, connections, the
+source scope, live progress, the manifest, the coverage panel, and baseline
+spend priced from the catalog. There are still no findings pages, because no
+analyzer exists yet and a page that renders plausible fake numbers is the exact
+failure this project is trying to avoid (AGENTS.md).
+
+The cost panel is the first place two surfaces show the same money, so the
+arithmetic lives in `baseline.compute()` and both this app and `runs cost`
+merely format its result. Neither can drift from the other, because neither
+does the sum.
 
 Security posture, all of it deliberate (§12):
 
@@ -39,14 +44,23 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .. import baseline, engine
 from .. import config as config_module
-from .. import engine
 from .. import window as window_module
 from ..cli import peek_connection
 from ..config import Connection, WorkspaceConfig, check_in_scope
 from ..errors import AuditorError, SourceScopeError
 from ..ingest import local
-from ..run_store import MANIFEST_JSON, RunRecord, RunRequest, RunStatus, RunStore, Stage
+from ..record_store import RecordStore
+from ..run_store import (
+    MANIFEST_JSON,
+    RECORDS_PARQUET,
+    RunRecord,
+    RunRequest,
+    RunStatus,
+    RunStore,
+    Stage,
+)
 
 HERE = Path(__file__).parent
 CSRF_COOKIE = "lca_csrf"
@@ -158,6 +172,45 @@ def create_app(workspace: Path) -> FastAPI:
             manifest=runs.read_manifest(run_id),
             events=list(runs.read_events(run_id)),
         )
+
+    def _baseline(run_id: str) -> baseline.Baseline | None:
+        """Price a run's stored records, or `None` if there are none to price.
+
+        Computed on read rather than stored: pricing is read-only over an
+        existing ingest (§11.1), and a cached total is a total that can go stale
+        against the catalog without anything saying so.
+        """
+        _lookup(runs, run_id)
+        store = RecordStore(runs.artifact_path(run_id, RECORDS_PARQUET))
+        if not store.exists():
+            return None
+        return baseline.compute(store.iter_records())
+
+    @application.get("/runs/{run_id}/cost", response_class=HTMLResponse)
+    def run_cost_fragment(request: Request, run_id: str) -> HTMLResponse:
+        """The cost panel, loaded into the run page by HTMX.
+
+        A fragment rather than part of the page body because pricing walks every
+        record: the run page stays fast, and a large run shows its coverage and
+        manifest while this is still counting.
+        """
+        return page(request, "_cost.html", run_id=run_id, baseline=_baseline(run_id))
+
+    @application.get("/api/runs/{run_id}/cost")
+    def api_run_cost(run_id: str) -> dict[str, Any]:
+        """The same figures as `runs cost`, as JSON.
+
+        Every monetary field is an integer of micro-USD named `_usd_micros`
+        (§6.4) — the formatted dollar strings live only in the HTML, and nothing
+        reads one back.
+        """
+        result = _baseline(run_id)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"run {run_id} has no records.parquet (purged, or ingest did not complete)",
+            )
+        return result.model_dump(mode="json")
 
     @application.get("/runs/{run_id}/live", response_class=HTMLResponse)
     def run_live_fragment(request: Request, run_id: str) -> HTMLResponse:

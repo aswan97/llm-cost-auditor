@@ -23,12 +23,13 @@
      look more certain than they are (SPEC.md §15.6); the honest version of
      that here is to say plainly that no number has been produced yet. #}
   <div class="note">
-    <strong>Ingest-stage build</strong>
-    This build implements ingest only — connectors, decoding, the Anthropic
-    adapter, retry classification, the run store, and coverage. There is no
-    pricing engine and there are no analyzers yet, so no page here shows a
-    dollar figure or a finding. Everything displayed is read from the run
-    record on disk.
+    <strong>Pricing-stage build</strong>
+    This build implements ingest and pricing — connectors, decoding, the
+    Anthropic adapter, retry classification, the run store, coverage, and
+    baseline spend at public list prices. There are no analyzers yet, so no
+    page here shows a finding, a saving, or a recommendation; a run page shows
+    what its traffic cost and nothing about what it could have cost.
+    Every figure is computed from the run record on disk and the price catalog.
   </div>
   {% block body %}{% endblock %}
 </main>

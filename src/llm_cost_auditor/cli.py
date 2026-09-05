@@ -22,11 +22,11 @@ from typing import Annotated, Any
 
 import typer
 
+from . import baseline, engine
 from . import config as config_module
-from . import engine, pricing
 from . import window as window_module
 from .config import DEFAULT_WORKSPACE, Connection, WorkspaceConfig, check_in_scope
-from .errors import AuditorError, MissingPriceError
+from .errors import AuditorError
 from .ingest import decode, local
 from .ingest.adapters import anthropic
 from .pricing import catalog as load_catalog
@@ -66,11 +66,6 @@ WorkspaceOption = Annotated[
 
 def _out(message: str = "") -> None:
     typer.echo(message)
-
-
-def _usd(micros: int) -> str:
-    """Format uUSD as dollars, once, at the edge. Never parsed back (AGENTS.md)."""
-    return f"${micros / 1_000_000:,.2f}"
 
 
 def _fail(message: str) -> None:
@@ -577,65 +572,32 @@ def runs_cost(
     if not store.exists():
         _fail(f"run {run_id} has no records.parquet (purged, or ingest did not complete)")
 
-    total = 0
-    exposure = 0
-    priced = 0
-    by_model: dict[str, list[int]] = {}
-    unpriced_models: dict[tuple[str, str], int] = {}
-    partial: dict[str, int] = {}
-    oldest: Any = None
-
-    for record in store.iter_records():
-        key = f"{record.provider}/{record.model}"
-        try:
-            cost = pricing.cost_of(record)
-        except MissingPriceError as exc:
-            unpriced_models[(key, exc.reason)] = unpriced_models.get((key, exc.reason), 0) + 1
-            continue
-        priced += 1
-        total += cost.total_usd_micros
-        exposure += cost.ttl_unknown_exposure_usd_micros
-        bucket = by_model.setdefault(key, [0, 0])
-        bucket[0] += cost.total_usd_micros
-        bucket[1] += 1
-        for name in cost.unpriced_token_classes:
-            partial[name] = partial.get(name, 0) + 1
-        oldest = cost.last_verified if oldest is None else min(oldest, cost.last_verified)
-
-    if not priced and not unpriced_models:
+    result = baseline.compute(store.iter_records())
+    if not result.priced_records and not result.excluded:
         _fail(f"run {run_id} has no records to price.")
 
     _out(f"Baseline spend — run {run_id}")
-    _out(f"catalog {load_catalog().version}, oldest verification {oldest}")
+    _out(f"catalog {result.catalog_version}, oldest verification {result.oldest_verification}")
     _out()
     _out(f"  {'model':<34}{'records':>9}{'spend':>16}")
-    for key, (spend, count) in sorted(by_model.items(), key=lambda kv: -kv[1][0]):
-        _out(f"  {key:<34}{count:>9}{_usd(spend):>16}")
-    _out(f"  {'':<34}{priced:>9}{_usd(total):>16}")
+    for row in result.by_model:
+        _out(f"  {row.label:<34}{row.records:>9}{row.spend:>16}")
+    _out(f"  {'':<34}{result.priced_records:>9}{result.total:>16}")
     _out()
 
-    if exposure:
+    if result.ttl_unknown_exposure_usd_micros:
         _out(
             f"~ cache writes with an unknown TTL class are billed at the lowest premium; "
-            f"up to {_usd(exposure)} more is possible (SPEC.md §6.2)."
+            f"up to {result.ttl_unknown_exposure} more is possible (SPEC.md §6.2)."
         )
-    for name, count in sorted(partial.items()):
+    for name, count in result.partially_priced:
         _out(
             f"~ {count} record(s) carry {name}, which this catalog cannot price. "
             f"The total above is a lower bound."
         )
-    for (key, reason), count in sorted(unpriced_models.items()):
-        if reason == MissingPriceError.UNKNOWN_MODEL:
-            _out(
-                f"! {count} record(s) on {key} — no catalog row for that model at all. "
-                f"Excluded entirely."
-            )
-        else:
-            _out(
-                f"! {count} record(s) on {key} — the model is priced, but no row covers "
-                f"their timestamps. A historical rate is missing, not the model. Excluded."
-            )
-    if not exposure and not partial and not unpriced_models:
+    for item in result.excluded:
+        _out(f"! {item.records} record(s) on {item.label} — {item.explanation}")
+    if not result.has_caveats:
         _out("Every record was priced, with no unpriced dimensions.")
     _out()
     _out("Public list prices. No commercial overlay is applied (SPEC.md §7.2), so an")

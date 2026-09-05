@@ -35,6 +35,12 @@
 
 {% include "_live.html" %}
 
+{# Loaded rather than inlined: pricing walks every record, so the page renders
+   its manifest and coverage first and the total arrives when it is ready. #}
+<div hx-get="/runs/{{ run.run_id }}/cost" hx-trigger="load" hx-swap="outerHTML">
+  <div class="panel muted">Pricing records…</div>
+</div>
+
 <div class="note">
   <strong>Later stages</strong>
   <code>profile</code> and <code>audit</code> are not implemented in this build,
