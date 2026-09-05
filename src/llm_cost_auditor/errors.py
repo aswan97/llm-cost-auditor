@@ -24,6 +24,30 @@ class SourceScopeError(ConfigError):
     """
 
 
+class MissingPriceError(AuditorError):
+    """No catalog rate covers this provider/model/timestamp (SPEC.md §7.1).
+
+    Its own class because it is never fatal to a run and never a reason to
+    guess: the caller records a *missing price* coverage entry, excludes the
+    model from savings math, and reports it. Falling back to today's rate, to a
+    sibling model, or to zero would each produce a number that looks exactly
+    like a real one.
+
+    `reason` separates the two cases, which need different fixes and must not
+    be reported as one: an unknown model means the catalog has never heard of
+    it, while an uncovered timestamp means the model is known and the *period*
+    is missing — usually a historical row nobody backfilled. Told the same
+    thing, a user goes looking in the wrong place.
+    """
+
+    UNKNOWN_MODEL = "unknown_model"
+    NO_ROW_FOR_TIMESTAMP = "no_row_for_timestamp"
+
+    def __init__(self, message: str, *, reason: str = UNKNOWN_MODEL) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class DecodeError(AuditorError):
     """An object could not be decoded as its detected format (SPEC.md §6.1).
 

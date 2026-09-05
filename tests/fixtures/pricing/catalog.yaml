@@ -1,0 +1,86 @@
+# A test catalog, never the bundled one (AGENTS.md).
+#
+# The rates here are chosen so a human can do the arithmetic in their head:
+# $10.00/MTok means one token costs exactly 10 uUSD. That is what makes the
+# expected values in README.md checkable by inspection rather than by rerunning
+# the code that produced them. Real prices change; these never do, so a
+# catalogue refresh can never turn a green analyzer test red.
+
+version: "test-1"
+
+rows:
+  # The workhorse. Two rows for the same model, adjacent in time, so a request
+  # either side of the boundary is priced at the rate in force at its own
+  # timestamp rather than at whichever one loaded first.
+  - model: test-model
+    provider: testco
+    effective_from: 2026-01-01
+    effective_to: 2026-06-30
+    currency: USD
+    units: per_mtok
+    input: "10.00"
+    output: "40.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 1000
+    max_breakpoints: 4
+    last_verified: 2026-01-01
+    source_url: https://example.invalid/pricing
+
+  - model: test-model
+    provider: testco
+    effective_from: 2026-07-01
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "12.00"
+    output: "48.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 1000
+    max_breakpoints: 4
+    last_verified: 2026-01-01
+    source_url: https://example.invalid/pricing
+
+  # OpenAI-shaped: prompt caching is automatic and free to write, so there is
+  # no write premium to bill and no breakpoint to place. The multipliers are
+  # null rather than zero, and asking for one is an error rather than a freebie.
+  - model: test-nocache
+    provider: testco
+    effective_from: 2026-01-01
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "10.00"
+    output: "40.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    last_verified: 2026-01-01
+    source_url: https://example.invalid/pricing
+
+  # Cheap enough that a single token costs a fraction of a uUSD, which is the
+  # only way to pin the rounding mode. At $0.05/MTok one token is 0.05 uUSD.
+  - model: test-cheap
+    provider: testco
+    effective_from: 2026-01-01
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "0.05"
+    output: "0.40"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 1000
+    max_breakpoints: 4
+    last_verified: 2025-01-01
+    source_url: https://example.invalid/pricing
