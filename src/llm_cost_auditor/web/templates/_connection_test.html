@@ -1,0 +1,19 @@
+<div class="panel">
+  <h3>Connection test — {{ result.connection_id }}</h3>
+  <dl class="facts">
+    <dt>URI</dt><dd>{{ result.uri }}</dd>
+    <dt>Connector / source</dt><dd>{{ result.connector }} → {{ result.source }}</dd>
+    <dt>Identity</dt><dd>{{ result.identity }}</dd>
+    <dt>Permissions exercised</dt><dd>{{ result.permissions_exercised | join(', ') }}</dd>
+    <dt>Objects listed</dt><dd>{{ result.objects }}</dd>
+    <dt>Bytes listed</dt><dd>{{ "{:,}".format(result.bytes) }}</dd>
+  </dl>
+  {% if result.empty %}
+  <div class="note warn mt"><strong>Matched no objects</strong>
+    "No traffic" and "no logs delivered" look identical from here (SPEC.md §15.9).</div>
+  {% endif %}
+  {% for failure in result.failures %}
+  <div class="note bad mt"><strong>Unreadable</strong>
+    <span class="mono small">{{ failure.uri }}</span> — {{ failure.error }}</div>
+  {% endfor %}
+</div>

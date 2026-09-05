@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% set nav = 'new' %}
+{% block title %}New run · llm-cost-auditor{% endblock %}
+{% block body %}
+<h1>New run</h1>
+<p class="sub">Pick one or more connections, set the window, and check the estimate before starting.</p>
+
+{% if not connections %}
+  <div class="panel muted">
+    No connections configured. Add one on the
+    <a href="/connections">Connections</a> page first.
+  </div>
+{% else %}
+<form class="panel stack" method="post" action="/runs/start">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <div>
+    <label>Connections</label>
+    <div class="checks">
+      {% for c in connections %}
+      <label>
+        <input type="checkbox" name="connection_ids" value="{{ c.id }}"
+               {% if not in_scope[c.id] %}disabled{% endif %}>
+        <span class="mono">{{ c.id }}</span>
+        <span class="muted small">{{ c.source }} · {{ c.uri }}</span>
+        {% if not in_scope[c.id] %}<span class="pill bad">out of scope</span>{% endif %}
+      </label>
+      {% endfor %}
+    </div>
+    <p class="small muted mt">
+      A run may name several connections — cross-provider baseline spend is the
+      interesting number, and each connection contributes its own slice (SPEC.md §6.6).
+    </p>
+  </div>
+
+  <div class="row">
+    <div>
+      <label for="win">Window (optional)</label>
+      <input type="text" id="win" name="audit_window" placeholder="2026-08-01..2026-08-31">
+    </div>
+    <div>
+      <label for="tz">Timezone</label>
+      <input type="text" id="tz" name="timezone" value="{{ timezone }}">
+    </div>
+  </div>
+  <p class="small muted" style="margin-top:-0.3rem">
+    The end date is included in full. Windows, day boundaries, and every date in
+    the report are expressed in this zone; records are stored UTC and converted
+    for display, never the reverse (SPEC.md §6.6).
+  </p>
+
+  <div class="actions">
+    <button type="button" hx-post="/runs/preflight" hx-include="closest form"
+            hx-target="#preflight" hx-swap="innerHTML">Estimate</button>
+    <button class="primary" type="submit">Start run</button>
+  </div>
+
+  <div id="preflight"></div>
+</form>
+
+<div class="note warn">
+  <strong>Ingest is bulk</strong>
+  Every run reads the full window it was given, from every connection it names,
+  every time. A repeat audit re-lists and re-reads the same objects — the
+  estimate above is the volume you are about to pay for. The incremental design
+  that avoided this produced runs whose records depended on what an earlier run
+  happened to read, which is a silently wrong baseline rather than a slow one
+  (SPEC.md §6.6, §15.11).
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% set nav = 'connections' %}
+{% block title %}Connections · llm-cost-auditor{% endblock %}
+{% block body %}
+<h1>Connections</h1>
+<p class="sub">A named binding of a connector to a location and a source. Config, not state — and it holds no secret material.</p>
+
+<div class="note">
+  <strong>Source scope</strong>
+  Every connection is validated against these roots on save <em>and</em> again on
+  use. The scope is editable only from a terminal — there is no write route for
+  it in the API or this UI (SPEC.md §6.1).
+  <div class="mt mono small">
+    {% if sources %}{% for root in sources %}{{ root }}<br>{% endfor %}
+    {% else %}<em>empty — nothing can be read. Add one with</em>
+      <code>llm-cost-auditor sources add ./logs</code>{% endif %}
+  </div>
+</div>
+
+{% if error %}<div class="note bad"><strong>Rejected</strong>{{ error }}</div>{% endif %}
+
+{% if connections %}
+<div class="panel scroll">
+  <table>
+    <thead>
+      <tr><th>Id</th><th>Connector</th><th>Source</th><th>URI</th><th>Format</th>
+          <th>Scope</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for c in connections %}
+      <tr>
+        <td class="mono">{{ c.id }}</td>
+        <td>{{ c.connector }}</td>
+        <td>{{ c.source }}</td>
+        <td class="mono small">{{ c.uri }}</td>
+        <td class="small">{{ c.compression }} / {{ c.format }}</td>
+        <td>
+          {% if in_scope[c.id] %}<span class="pill ok">in scope</span>
+          {% else %}<span class="pill bad">out of scope</span>{% endif %}
+        </td>
+        <td>
+          <div class="actions">
+            <button hx-post="/connections/{{ c.id }}/test" hx-target="#detail" hx-swap="innerHTML">Test</button>
+            <button hx-post="/connections/{{ c.id }}/peek" hx-target="#detail" hx-swap="innerHTML">Preview</button>
+            <form method="post" action="/connections/{{ c.id }}/delete" style="display:inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit">Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="panel muted">No connections configured.</div>
+{% endif %}
+
+<div id="detail"></div>
+
+<h2>Add a connection</h2>
+<form class="panel stack" method="post" action="/connections/add">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="row">
+    <div><label for="cid">Id</label>
+      <input type="text" id="cid" name="connection_id" placeholder="local-anthropic" required></div>
+    <div><label for="curi">URI (path, file:///path, or a glob)</label>
+      <input type="text" id="curi" name="uri" placeholder="./logs/anthropic/*.jsonl.gz" required></div>
+  </div>
+  <div class="row">
+    <div><label for="csrc">Source</label>
+      <select id="csrc" name="source"><option value="anthropic">anthropic</option></select></div>
+    <div><label for="cfmt">Container</label>
+      <select id="cfmt" name="log_format">
+        <option value="auto">auto</option><option value="jsonl">jsonl</option>
+        <option value="json">json</option></select></div>
+    <div><label for="ccmp">Compression</label>
+      <select id="ccmp" name="compression">
+        <option value="auto">auto</option><option value="none">none</option>
+        <option value="gzip">gzip</option><option value="bzip2">bzip2</option>
+        <option value="zstd">zstd</option></select></div>
+    <div><label for="cpart">Partition template (optional)</label>
+      <input type="text" id="cpart" name="partition" placeholder="y=%Y/m=%m/d=%d/"></div>
+  </div>
+  <div class="actions"><button class="primary" type="submit">Save connection</button></div>
+  <p class="small muted">
+    Only the <code>file</code> connector and the <code>anthropic</code> adapter exist in this
+    build. S3 comes next, and the <code>Connector</code> protocol is extracted then — an
+    interface designed around a local directory would be wrong about pagination,
+    listing cost, retries, and credentials (SPEC.md §6.1).
+  </p>
+</form>
+{% endblock %}

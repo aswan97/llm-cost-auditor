@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% set nav = 'runs' %}
+{% block title %}{{ run.run_id }} · llm-cost-auditor{% endblock %}
+{% block body %}
+<h1>{{ run.run_id }}</h1>
+<p class="sub">
+  A run is a directory on disk — inspectable, diffable, copyable, and deletable
+  with <code>rm -rf</code>. Everything below is read from it.
+</p>
+
+<div class="panel">
+  <dl class="facts">
+    <dt>Connections</dt><dd>{{ run.request.connection_ids | join(', ') }}</dd>
+    <dt>Requested window</dt>
+    <dd>{{ run.request.window or 'all available data' }} ({{ run.request.timezone }})</dd>
+    <dt>Observed range</dt>
+    <dd>{% if run.observed_start %}{{ run.observed_start }} .. {{ run.observed_end }} (UTC)
+        {% else %}—{% endif %}</dd>
+    <dt>Created</dt><dd>{{ run.created_at }}</dd>
+    <dt>Stages completed</dt>
+    <dd>{{ run.stages_completed | map(attribute='value') | join(', ') or '—' }}</dd>
+    <dt>Parent run</dt><dd>{{ run.parent_run_id or '—' }}</dd>
+  </dl>
+  <div class="actions mt">
+    <a class="btn" href="/api/runs/{{ run.run_id }}">run.json</a>
+    <a class="btn" href="/api/runs/{{ run.run_id }}/manifest">manifest.json</a>
+    {% if not run.status.terminal %}
+    <form method="post" action="/runs/{{ run.run_id }}/cancel" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Cancel</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+{% include "_live.html" %}
+
+<div class="note">
+  <strong>Later stages</strong>
+  <code>profile</code> and <code>audit</code> are not implemented in this build,
+  so this run stops after ingest. The executive section, the findings table, and
+  the workload pages render a finding set that does not exist yet — they are
+  built after the first analyzer produces real output, never against mock data
+  (AGENTS.md, SPEC.md §4).
+</div>
+{% endblock %}
