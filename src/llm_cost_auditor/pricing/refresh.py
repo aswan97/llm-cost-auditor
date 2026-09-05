@@ -90,6 +90,20 @@ def fetch(url: str = FEED_URL, *, timeout: int = 30) -> dict[str, Any]:
     return payload
 
 
+def _plain(value: Decimal) -> str:
+    """A decimal a person can read: no trailing zeros, and never an exponent.
+
+    `Decimal("20.00").normalize()` is `2E+1` — a correct number and a terrible
+    thing to print beside another number in a drift report, where the whole job
+    is letting someone see at a glance which one moved.
+    """
+    normalized = value.normalize()
+    exponent = normalized.as_tuple().exponent
+    if isinstance(exponent, int) and exponent > 0:
+        normalized = normalized.quantize(Decimal(1))
+    return f"{normalized:f}"
+
+
 def _per_mtok(value: Any) -> Decimal | None:
     if value is None:
         return None
@@ -142,11 +156,52 @@ def _compare_row(row: PriceRow, entry: dict[str, Any]) -> list[Drift]:
                 provider=row.provider,
                 model=row.model,
                 field=field,
-                catalog=str(ours),
-                feed=str(theirs),
+                catalog=_plain(ours),
+                feed=_plain(theirs),
                 source_url=row.source_url,
             )
         )
+
+    # A tier is priced data like any other, so it drifts like any other. The
+    # feed spells its threshold into the field name (`..._above_272k_tokens`),
+    # which means a *moved threshold* shows up here as the tier fields silently
+    # going missing — reported as silence rather than as a matching price.
+    tier = row.long_context
+    if tier is not None:
+        suffix = f"_above_{tier.threshold_tokens // 1000}k_tokens"
+        tier_base = tier.input
+        tier_checks: list[tuple[str, Decimal | None, Decimal | None]] = [
+            (
+                f"long_context.input (>{tier.threshold_tokens})",
+                tier.input.normalize(),
+                _per_mtok(entry.get(f"input_cost_per_token{suffix}")),
+            ),
+            (
+                f"long_context.output (>{tier.threshold_tokens})",
+                tier.output.normalize(),
+                _per_mtok(entry.get(f"output_cost_per_token{suffix}")),
+            ),
+            (
+                f"long_context.cache_read_multiplier (>{tier.threshold_tokens})",
+                None
+                if tier.cache_read_multiplier is None
+                else tier.cache_read_multiplier.normalize(),
+                _ratio(entry.get(f"cache_read_input_token_cost{suffix}"), tier_base),
+            ),
+        ]
+        for field, ours, theirs in tier_checks:
+            if theirs is None or ours is None or ours == theirs:
+                continue
+            drifts.append(
+                Drift(
+                    provider=row.provider,
+                    model=row.model,
+                    field=field,
+                    catalog=_plain(ours),
+                    feed=_plain(theirs),
+                    source_url=row.source_url,
+                )
+            )
 
     ours_min = row.min_cacheable_tokens
     theirs_min = entry.get("prompt_cache_min_tokens")

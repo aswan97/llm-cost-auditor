@@ -48,6 +48,7 @@ __all__ = [
     "cost_of",
     "multiplier",
     "rate",
+    "token_counts_transferable",
 ]
 
 # Token classes that are a *breakdown of* output tokens rather than an addition
@@ -96,6 +97,16 @@ class Rate(BaseModel):
     min_cacheable_tokens: int | None = None
     max_breakpoints: int | None = None
 
+    # The tokenizer that produced the counts this rate prices. A token count is
+    # only portable within one family: the same text tokenizes differently on
+    # Claude and GPT, so multiplying one model's counts by another's rates is
+    # wrong by whatever the two disagree by. Call `token_counts_transferable()`
+    # before any cross-model comparison.
+    tokenizer: str = ""
+
+    # Present when the model reprices the whole request above a prompt size.
+    long_context_threshold_tokens: int | None = None
+
     def age_days(self, today: date) -> int:
         return (today - self.last_verified).days
 
@@ -128,12 +139,40 @@ class RecordCost(BaseModel):
     # means the total is a lower bound, and the caller must say so.
     unpriced_token_classes: tuple[str, ...] = ()
 
+    # True when the prompt crossed the model's long-context threshold and the
+    # whole request was repriced at the higher tier. Stated because a reader
+    # comparing two similar requests needs to know why one cost twice the other.
+    long_context_applied: bool = False
+
     last_verified: date
     catalog_version: str
 
     @property
     def is_complete(self) -> bool:
         return not self.unpriced_token_classes
+
+
+def token_counts_transferable(
+    a: tuple[str, str], b: tuple[str, str], *, at: datetime, path: Path | None = None
+) -> bool:
+    """Whether one model's token counts may be priced with another's rates.
+
+    Only within a tokenizer family. The same text tokenizes differently on
+    Claude and on GPT, so a routing comparison that takes a logged Claude token
+    count and multiplies it by a GPT rate is wrong by whatever the two
+    tokenizers disagree by — silently, in the direction of whichever tokenizer
+    is more compact, on every request at once.
+
+    Crossing families needs the prompt re-tokenized with the target model's
+    tokenizer, which requires Tier A content (§6.3) and is therefore impossible
+    on billing-only logs. An analyzer that cannot re-tokenize must either stay
+    inside a family or decline the comparison and say why.
+
+    Each argument is `(provider, model)`.
+    """
+    left = _row(a[0], a[1], at, path)
+    right = _row(b[0], b[1], at, path)
+    return bool(left.tokenizer) and left.tokenizer == right.tokenizer
 
 
 def catalog(path: Path | None = None) -> Catalog:
@@ -162,6 +201,10 @@ def rate(provider: str, model: str, *, at: datetime, path: Path | None = None) -
         catalog_version=load(path).version,
         min_cacheable_tokens=row.min_cacheable_tokens,
         max_breakpoints=row.max_breakpoints,
+        tokenizer=row.tokenizer,
+        long_context_threshold_tokens=(
+            None if row.long_context is None else row.long_context.threshold_tokens
+        ),
     )
 
 
@@ -209,30 +252,40 @@ def cost_of(record: RequestRecord, *, path: Path | None = None) -> RecordCost:
     by_class: dict[str, int] = {}
     exposure = 0
 
+    # Only the prompt counts toward a long-context threshold, so a long answer
+    # to a short question stays on the base rate. Crossing it reprices the
+    # *whole* request rather than only the excess tokens — that is how both
+    # providers bill it, and the two readings differ by far more than rounding.
+    prompt_tokens = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    rates = row.rates_for(prompt_tokens)
+    tiered = rates is not row
+
     if record.status is not Status.ERROR_UNBILLED:
-        batch: tuple[Decimal, ...] = (row.multiplier(MultiplierKind.BATCH),) if record.batch else ()
-        inp = row.input_micros_per_mtok
-        out = row.output_micros_per_mtok
+        batch: tuple[Decimal, ...] = (
+            (row.multiplier(MultiplierKind.BATCH, label=row.label),) if record.batch else ()
+        )
+        inp = rates.input_micros_per_mtok
+        out = rates.output_micros_per_mtok
 
         by_class["input"] = _amount(inp, batch, usage.input_tokens)
         by_class["output"] = _amount(out, batch, usage.output_tokens)
 
         if usage.cache_read_tokens:
-            read = row.multiplier(MultiplierKind.CACHE_READ)
+            read = rates.multiplier(MultiplierKind.CACHE_READ, label=row.label)
             by_class["cache_read"] = _amount(inp, (read, *batch), usage.cache_read_tokens)
 
         if usage.cache_write_5m_tokens:
-            five = row.multiplier(MultiplierKind.CACHE_WRITE_5M)
+            five = rates.multiplier(MultiplierKind.CACHE_WRITE_5M, label=row.label)
             by_class["cache_write_5m"] = _amount(inp, (five, *batch), usage.cache_write_5m_tokens)
 
         if usage.cache_write_1h_tokens:
-            hour = row.multiplier(MultiplierKind.CACHE_WRITE_1H)
+            hour = rates.multiplier(MultiplierKind.CACHE_WRITE_1H, label=row.label)
             by_class["cache_write_1h"] = _amount(inp, (hour, *batch), usage.cache_write_1h_tokens)
 
         if usage.cache_write_unknown_ttl_tokens:
             classes = (
-                row.multiplier(MultiplierKind.CACHE_WRITE_5M),
-                row.multiplier(MultiplierKind.CACHE_WRITE_1H),
+                rates.multiplier(MultiplierKind.CACHE_WRITE_5M, label=row.label),
+                rates.multiplier(MultiplierKind.CACHE_WRITE_1H, label=row.label),
             )
             tokens = usage.cache_write_unknown_ttl_tokens
             cheapest = _amount(inp, (min(classes), *batch), tokens)
@@ -242,14 +295,6 @@ def cost_of(record: RequestRecord, *, path: Path | None = None) -> RecordCost:
 
     unpriced = [name for name in _UNPRICED if getattr(usage, name)]
 
-    # A tiered model whose request crosses the tier boundary is priced at the
-    # base rate, which is too low. Say so rather than report the low number.
-    threshold = row.long_context_threshold_tokens
-    if threshold is not None:
-        context = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
-        if context > threshold:
-            unpriced.append(f"input_above_{threshold}_tokens")
-
     return RecordCost(
         provider=row.provider,
         model=row.model,
@@ -257,6 +302,7 @@ def cost_of(record: RequestRecord, *, path: Path | None = None) -> RecordCost:
         by_class_usd_micros=by_class,
         ttl_unknown_exposure_usd_micros=exposure,
         unpriced_token_classes=tuple(unpriced),
+        long_context_applied=tiered,
         last_verified=row.last_verified,
         catalog_version=load(path).version,
     )

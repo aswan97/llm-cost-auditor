@@ -179,3 +179,55 @@ the rounding mode becomes visible. Half-even, applied once:
 
 Half-up would give 1 and 2; banker's rounding gives 0 and 2. The pair is what
 distinguishes them, which is why both are asserted rather than just one.
+
+## 13. A long-context tier
+
+`test-tiered` is $10.00 / $40.00 per MTok, and above **2000 prompt tokens** it
+reprices to $20.00 / $60.00 — the same 2x input / 1.5x output shape both real
+providers use.
+
+Two rules do all the work here, and both are easy to get backwards.
+
+**The threshold is exclusive, and only the prompt counts toward it.** Input,
+cache reads and cache writes are prompt; output is not.
+
+```
+2,000 in + 100 out    2,000 x 10 + 100 x 40    = 24,000   (base: at, not above)
+2,001 in + 100 out    2,001 x 20 + 100 x 60    = 46,020   (tier)
+  100 in + 5,000 out    100 x 10 + 5,000 x 40  = 201,000  (base: output does not count)
+```
+
+**Crossing reprices the whole request, not the excess.** This is the single most
+consequential way to get long-context billing wrong:
+
+```
+3,000 in   wholesale   3,000 x 20               = 60,000   <- correct
+3,000 in   marginal    2,000 x 10 + 1,000 x 20  = 40,000   <- wrong, and plausible
+```
+
+A third less, with nothing in the output to suggest it. The test asserts the
+wholesale figure *and* asserts the marginal one is not produced.
+
+Cache tokens count toward the threshold and then take the multiplier off the
+**tiered** input rate, not the base one:
+
+```
+2,500 cache read   2,500 x 20 x 0.1             = 5,000
+  100 output         100 x 60                   = 6,000
+                                          total = 11,000
+```
+
+## 14. Rounding is per token class, not per token
+
+Worth stating because it is what makes fractional per-token rates exact. The
+bundled `claude-sonnet-4-5` tier bills output at $22.50/MTok — 22.5 uUSD per
+token, which is not representable in whole uUSD:
+
+```
+100 output tokens   22,500,000 uUSD/MTok x 100 / 1,000,000 = 2,250   exactly
+```
+
+Rounding once per class gives 2,250. Rounding per token would give 100 charges
+of 22 or 23 and a total that depends on the rounding mode — which is why the
+rate is held per MTok and the multiplication happens before the single
+`quantize`.

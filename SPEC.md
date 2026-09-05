@@ -506,9 +506,18 @@ Seeding a row works the same way: transcribe only what more than one independent
 
 - **No feed carries history.** They publish today's list, so `effective_from` / `effective_to` is ours to maintain, accumulated as changes are observed. A request whose timestamp falls outside every row for its model is *unpriced and reported*, never repriced at today's rate.
 - **No feed carries batch multipliers** for first-party Anthropic or OpenAI rows. `prices check` reports them as unverifiable rather than silently skipping them.
-- **Long-context tiers are not modelled.** Some models bill a higher rate above a context threshold. A row may declare `long_context_threshold_tokens`, which exists only to *refuse*: a request above it is reported as partially priced rather than charged the base rate, which would understate the largest requests by the width of the tier. Modelling the tiers properly is a schema change and waits until more than one model needs it.
+- **Long-context tiers move, and the feeds name them inconsistently.** The tier rates themselves are carried (see below), but the *threshold* is spelled into the feed's field names, so a provider moving the boundary makes the tier fields go quiet rather than disagree. `prices check` reports that as unverifiable, which is honest — it is not a matching price.
 
 **`null` is never zero.** A multiplier absent from a row means the provider does not sell that token class — OpenAI's prompt caching is automatic and has no write to bill — and asking for it is an error. Defaulting it to zero would price a whole token class at nothing and read as a saving.
+
+**Long-context tiers are part of the row.** Several models reprice above a prompt-size threshold — `claude-sonnet-4-5` above 200k, `gpt-5.5` and `gpt-5.5-pro` above 272k, all at input x2 and output x1.5. A row may carry a `long_context` block holding the tier's own rates and multipliers, and two rules govern it:
+
+- **The reprice is wholesale, not marginal.** Crossing the threshold prices the *entire* request at the tier rate rather than charging only the excess tokens. Both providers bill it this way, and the marginal reading understates a 300k-token request by roughly a third — a plausible-looking number with nothing in the output to flag it.
+- **Only the prompt counts toward the threshold**: input, cache reads and cache writes. Output is billed at the tier's output rate but never pushes a request across, so a long answer to a short question stays on the base rate.
+
+A row with no `long_context` block has **verified absence** of a tier, not an unknown one: every bundled row was checked against all three feeds for one. Cache multipliers inside a tier are re-derived off the *tiered* input rate, not the base rate.
+
+**Token counts are not portable across tokenizer families.** Every row records the `tokenizer` that produced the counts it prices. The same text tokenizes differently on Claude and on GPT, so multiplying one model's logged token counts by another model's rates is wrong by whatever the two tokenizers disagree by — silently, in the direction of whichever is more compact, on every request at once. `pricing.token_counts_transferable()` is the check, and a routing analyzer (§10.2) must call it before any cross-model comparison. Crossing families requires re-tokenizing the prompt with the target model's tokenizer, which needs Tier A content (§6.3) and is therefore impossible on billing-only logs — an analyzer that cannot re-tokenize must stay inside a family or decline the comparison and say why. The same applies to the tier thresholds above: whether a prompt crosses 272k is itself a tokenizer-dependent question.
 
 **Consumption rule.** Analyzers never see raw numbers. They call `pricing.rate(provider, model, at=timestamp)` and `pricing.multiplier(...)`, so a price change, a new broker, or a new discount class never requires touching analyzer code.
 

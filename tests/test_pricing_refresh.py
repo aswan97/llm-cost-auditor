@@ -37,6 +37,18 @@ def feed(**overrides: Any) -> dict[str, Any]:
             "output_cost_per_token": 4e-05,
             "cache_read_input_token_cost": 1e-06,
         },
+        "test-tiered": {
+            "litellm_provider": "testco",
+            "input_cost_per_token": 1e-05,
+            "output_cost_per_token": 4e-05,
+            "cache_read_input_token_cost": 1e-06,
+            "cache_creation_input_token_cost": 1.25e-05,
+            "cache_creation_input_token_cost_above_1hr": 2e-05,
+            "input_cost_per_token_above_2k_tokens": 2e-05,
+            "output_cost_per_token_above_2k_tokens": 6e-05,
+            "cache_read_input_token_cost_above_2k_tokens": 2e-06,
+            "prompt_cache_min_tokens": 1000,
+        },
         "test-cheap": {
             "litellm_provider": "testco",
             "input_cost_per_token": 5e-08,
@@ -56,15 +68,17 @@ def test_an_agreeing_feed_reports_no_drift() -> None:
     report = refresh.check(pricing.catalog(CATALOG), feed(), at=AT)
     assert report.clean
     assert report.drifts == ()
-    assert report.rows_checked == 3
+    assert report.rows_checked == 4
 
 
 def test_only_in_force_rows_are_compared() -> None:
     """The feed is today's price list with no history, so a superseded row
     disagreeing with it is correct behaviour rather than drift."""
     report = refresh.check(pricing.catalog(CATALOG), feed(), at=AT)
-    # test-model has two rows; only the open-ended one is in force on 2026-08-01.
-    assert report.rows_checked == 3
+    # test-model has two rows; only the open-ended one is in force on 2026-08-01,
+    # so four rows are compared rather than five.
+    assert report.rows_checked == 4
+    assert len(pricing.catalog(CATALOG).rows) == 5
 
 
 def test_a_moved_base_rate_is_reported_with_both_values() -> None:
@@ -162,3 +176,28 @@ def test_the_catalog_is_not_parsed_at_import() -> None:
         check=True,
     )
     assert proof.stdout.strip() == "0"
+
+
+def test_a_moved_tier_rate_is_drift_like_any_other() -> None:
+    """A long-context surcharge is priced data, so it drifts like priced data."""
+    report = refresh.check(
+        pricing.catalog(CATALOG),
+        feed(test_tiered={"input_cost_per_token_above_2k_tokens": 2.5e-05}),
+        at=AT,
+    )
+    (drift,) = report.drifts
+    assert drift.field == "long_context.input (>2000)"
+    assert drift.catalog == "20"
+    assert drift.feed == "25"
+
+
+def test_a_moved_threshold_shows_up_as_the_tier_going_quiet() -> None:
+    """The feed spells the threshold into its field names, so a provider moving
+    the boundary makes our tier fields vanish rather than disagree. That reads as
+    unverifiable, which is the honest answer — it is not a matching price."""
+    moved = feed()
+    entry = moved["test-tiered"]
+    for key in [k for k in list(entry) if k.endswith("_above_2k_tokens")]:
+        entry[key.replace("_above_2k_tokens", "_above_4k_tokens")] = entry.pop(key)
+    report = refresh.check(pricing.catalog(CATALOG), moved, at=AT)
+    assert report.clean, "no false disagreement"

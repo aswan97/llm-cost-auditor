@@ -53,15 +53,69 @@ class MultiplierKind(StrEnum):
     BATCH = "batch"
 
 
-class PriceRow(BaseModel):
+class RateSet(BaseModel):
+    """Rates that apply at one context size.
+
+    Split out from `PriceRow` because a tiered model has two of them and the
+    pricing arithmetic must not care which one it was handed. `batch_multiplier`
+    is deliberately *not* here: the batch endpoint is a discount on how a
+    request is submitted, not on how large it is, so it lives on the row and
+    composes with whichever tier applies.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input: Decimal
+    output: Decimal
+    cache_read_multiplier: Decimal | None = None
+    cache_write_5m_multiplier: Decimal | None = None
+    cache_write_1h_multiplier: Decimal | None = None
+
+    @property
+    def input_micros_per_mtok(self) -> int:
+        return _to_micros(self.input)
+
+    @property
+    def output_micros_per_mtok(self) -> int:
+        return _to_micros(self.output)
+
+    def multiplier(self, kind: MultiplierKind, *, label: str = "this model") -> Decimal:
+        value = getattr(self, f"{kind.value}_multiplier", None)
+        if value is None:
+            raise MissingPriceError(
+                f"{label} has no {kind.value} rate: the provider does not sell that token "
+                f"class here, so there is nothing to price it at. This is reported as an "
+                f"unpriced dimension, never charged as zero."
+            )
+        return Decimal(value)
+
+
+class LongContextTier(RateSet):
+    """The rates that replace the base ones once a prompt crosses a threshold.
+
+    **Wholesale, not marginal.** Crossing the threshold reprices the entire
+    request, rather than charging the excess tokens at a higher rate — that is
+    how Anthropic and OpenAI both bill it, and the two readings differ by more
+    than a rounding error on a large prompt. Getting it backwards would
+    understate a 300k-token request by roughly the first 272k tokens' worth of
+    surcharge.
+
+    Only the **prompt** counts toward the threshold: input, cache reads, and
+    cache writes. Output is billed at the tier's output rate but does not push a
+    request over the line, which is why a long answer to a short question stays
+    on the base rate.
+    """
+
+    threshold_tokens: int = Field(ge=0)
+
+
+class PriceRow(RateSet):
     """One provider/model/period rate, as stored in the catalog.
 
     Frozen because a row is a fact about a past instant: a request is priced at
     the rate in force at *its own* timestamp, and a mutable row is how one run
     ends up pricing two identical requests differently.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
 
     model: str
     provider: str
@@ -70,24 +124,20 @@ class PriceRow(BaseModel):
     currency: str = "USD"
     units: str = "per_mtok"
 
-    input: Decimal
-    output: Decimal
-
-    cache_read_multiplier: Decimal | None = None
-    cache_write_5m_multiplier: Decimal | None = None
-    cache_write_1h_multiplier: Decimal | None = None
     batch_multiplier: Decimal | None = None
 
     min_cacheable_tokens: int | None = Field(default=None, ge=0)
     max_breakpoints: int | None = Field(default=None, ge=0)
 
-    # Some models bill a higher rate once the input context passes a threshold.
-    # This row carries no tier rates, so the threshold exists only to *refuse*:
-    # a request above it is reported as partially priced rather than charged at
-    # the base rate, which would understate the largest requests by the width of
-    # the tier. Modelling the tiers properly is a schema change, and it should
-    # wait until more than one model needs it.
-    long_context_threshold_tokens: int | None = Field(default=None, ge=0)
+    long_context: LongContextTier | None = None
+
+    # Which tokenizer produced the token counts this row prices. Not a rate, but
+    # it governs whether a count means the same thing on another model: the same
+    # text tokenizes differently across families, so a token count is only
+    # portable within one. A routing analyzer that multiplies one model's counts
+    # by another's rates without re-tokenizing is wrong by whatever the two
+    # tokenizers disagree by, and it is wrong silently.
+    tokenizer: str
 
     last_verified: date
     source_url: str
@@ -109,12 +159,8 @@ class PriceRow(BaseModel):
         return self
 
     @property
-    def input_micros_per_mtok(self) -> int:
-        return _to_micros(self.input)
-
-    @property
-    def output_micros_per_mtok(self) -> int:
-        return _to_micros(self.output)
+    def label(self) -> str:
+        return f"{self.provider}/{self.model}"
 
     def covers(self, moment: datetime) -> bool:
         """Whether this row is the rate in force at `moment`.
@@ -127,15 +173,17 @@ class PriceRow(BaseModel):
             return False
         return self.effective_to is None or day <= self.effective_to
 
-    def multiplier(self, kind: MultiplierKind) -> Decimal:
-        value = getattr(self, f"{kind.value}_multiplier")
-        if value is None:
-            raise MissingPriceError(
-                f"{self.provider}/{self.model} has no {kind.value} rate: the provider does "
-                f"not sell that token class for this model, so there is nothing to price it "
-                f"at. This is reported as an unpriced dimension, never charged as zero."
-            )
-        return Decimal(value)
+    def rates_for(self, prompt_tokens: int) -> RateSet:
+        """The rate set that applies to a prompt of this size.
+
+        A row with no `long_context` block has no tier — verified absence, not
+        an unknown: every model in the bundled catalog was checked against three
+        feeds for one.
+        """
+        tier = self.long_context
+        if tier is not None and prompt_tokens > tier.threshold_tokens:
+            return tier
+        return self
 
     def age_days(self, today: date) -> int:
         return (today - self.last_verified).days

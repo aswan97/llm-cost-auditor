@@ -279,24 +279,139 @@ def test_an_unknown_model_and_an_uncovered_period_are_told_apart() -> None:
     assert uncovered.value.reason == MissingPriceError.NO_ROW_FOR_TIMESTAMP
 
 
-def test_a_long_context_request_is_partially_priced_not_underpriced() -> None:
-    """The bundled sonnet-4-5 row has a tier it cannot price, so it says so."""
-    big = RequestRecord(
-        request_id="req",
-        source="anthropic",
-        provider="anthropic",
-        model="claude-sonnet-4-5",
-        connection_id="c",
-        object_uri="file:///fixture",
-        start_time=datetime(2026, 8, 1, tzinfo=UTC),
-        usage=Usage(input_tokens=250_000, output_tokens=100),
-    )
-    priced = pricing.cost_of(big)
-    assert priced.unpriced_token_classes == ("input_above_200000_tokens",)
-    assert priced.is_complete is False
+# --- README case 13: long-context tiers ---------------------------------------
 
-    small = big.model_copy(update={"usage": Usage(input_tokens=1000, output_tokens=100)})
-    assert pricing.cost_of(small).is_complete is True
+
+def test_a_prompt_under_the_threshold_stays_on_the_base_rate() -> None:
+    assert cost(record(model="test-tiered", input_tokens=1000, output_tokens=100)) == 14_000
+
+
+def test_the_threshold_is_exclusive() -> None:
+    """Exactly at the boundary is still the base rate; the tier is `> threshold`."""
+    assert cost(record(model="test-tiered", input_tokens=2000, output_tokens=100)) == 24_000
+    assert cost(record(model="test-tiered", input_tokens=2001, output_tokens=100)) == 46_020
+
+
+def test_crossing_the_threshold_reprices_the_whole_request_not_the_excess() -> None:
+    """Wholesale, not marginal — the single most consequential way to get this wrong.
+
+    3000 prompt tokens at the tier rate is 60,000. Charging the first 2000 at
+    the base rate and only the excess at the tier would give 40,000, a third
+    less, and would look entirely plausible in a report.
+    """
+    priced = pricing.cost_of(record(model="test-tiered", input_tokens=3000), path=CATALOG)
+    assert priced.total_usd_micros == 60_000
+    assert priced.total_usd_micros != 40_000, "that would be the marginal reading"
+    assert priced.long_context_applied is True
+
+
+def test_output_does_not_push_a_request_over_the_threshold() -> None:
+    """A long answer to a short question is not a long-context request."""
+    priced = pricing.cost_of(
+        record(model="test-tiered", input_tokens=100, output_tokens=5000), path=CATALOG
+    )
+    assert priced.total_usd_micros == 201_000
+    assert priced.long_context_applied is False
+
+
+def test_cache_tokens_count_toward_the_threshold_and_reprice_with_it() -> None:
+    """Cached prompt tokens are still prompt tokens, and the cache multiplier
+    then applies to the *tiered* input rate rather than the base one."""
+    priced = pricing.cost_of(
+        record(model="test-tiered", cache_read_tokens=2500, output_tokens=100), path=CATALOG
+    )
+    assert priced.by_class_usd_micros["cache_read"] == 5_000
+    assert priced.total_usd_micros == 11_000
+    assert priced.long_context_applied is True
+
+
+# --- the bundled tiers, against the real catalog ------------------------------
+
+
+def bundled(model: str, at: datetime, **usage: int) -> pricing.RecordCost:
+    return pricing.cost_of(
+        RequestRecord(
+            request_id="req",
+            source="s",
+            provider="anthropic" if model.startswith("claude") else "openai",
+            model=model,
+            connection_id="c",
+            object_uri="file:///fixture",
+            start_time=at,
+            usage=Usage(**usage),
+        )
+    )
+
+
+def test_sonnet_4_5_reprices_above_200k() -> None:
+    """$3.00/MTok base, $6.00/MTok above 200k prompt tokens (2x), output 1.5x."""
+    at = datetime(2026, 8, 1, tzinfo=UTC)
+    small = bundled("claude-sonnet-4-5", at, input_tokens=199_000, output_tokens=100)
+    assert small.total_usd_micros == 199_000 * 3 + 100 * 15
+    assert small.long_context_applied is False
+
+    # Tiered output is $22.50/MTok. Rounding is applied once per token *class*,
+    # not per token, so 100 tokens is exactly 2,250 uUSD rather than 100 rounded
+    # per-token charges — which is the whole reason the rate is held per MTok.
+    large = bundled("claude-sonnet-4-5", at, input_tokens=250_000, output_tokens=100)
+    assert large.total_usd_micros == 250_000 * 6 + 2_250
+    assert large.by_class_usd_micros == {"input": 1_500_000, "output": 2_250}
+    assert large.long_context_applied is True
+
+    # The surcharge is the point: the same request on the base rate would be
+    # a little over half as much, and nothing in the output would say why.
+    assert large.total_usd_micros == pytest.approx(1_502_250)
+    assert 250_000 * 3 + 1_500 == 751_500  # what the base rate would have charged
+
+
+@pytest.mark.parametrize(
+    ("model", "tokens", "expected_micros"),
+    [
+        ("gpt-5.5", 300_000, 300_000 * 10),
+        ("gpt-5.5-pro", 300_000, 300_000 * 60),
+    ],
+)
+def test_the_openai_272k_tier_applies(model: str, tokens: int, expected_micros: int) -> None:
+    at = datetime(2026, 8, 1, tzinfo=UTC)
+    priced = bundled(model, at, input_tokens=tokens)
+    assert priced.total_usd_micros == expected_micros
+    assert priced.long_context_applied is True
+
+
+def test_every_bundled_row_declares_a_tokenizer() -> None:
+    assert all(row.tokenizer for row in pricing.catalog().rows)
+
+
+def test_untiered_rows_are_verified_absence_not_unknown() -> None:
+    """Twelve of the fifteen rows have no tier, and that was checked rather than
+    assumed — so a huge prompt on one of them is priced, not flagged."""
+    at = datetime(2026, 8, 1, tzinfo=UTC)
+    priced = bundled("claude-opus-5", at, input_tokens=900_000)
+    assert priced.total_usd_micros == 900_000 * 5
+    assert priced.long_context_applied is False
+    assert priced.is_complete is True
+
+
+# --- tokenizers: what a routing analyzer must ask before comparing ------------
+
+
+def test_token_counts_are_transferable_only_inside_a_family() -> None:
+    at = datetime(2026, 8, 1, tzinfo=UTC)
+    assert pricing.token_counts_transferable(
+        ("anthropic", "claude-opus-5"), ("anthropic", "claude-haiku-4-5"), at=at
+    )
+    assert pricing.token_counts_transferable(("openai", "gpt-5.5"), ("openai", "gpt-5-nano"), at=at)
+    assert not pricing.token_counts_transferable(
+        ("anthropic", "claude-opus-5"), ("openai", "gpt-5.5"), at=at
+    )
+
+
+def test_transferability_is_not_about_the_provider_name() -> None:
+    """Two rows from one provider can still disagree, and the check is on the
+    tokenizer rather than on who sells the model."""
+    assert not pricing.token_counts_transferable(
+        ("testco", "test-model"), ("testco", "test-tiered"), at=BEFORE, path=CATALOG
+    )
 
 
 def test_fable_5_1_cache_reads_are_deliberately_off_pattern() -> None:

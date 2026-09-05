@@ -40,6 +40,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 512
     max_breakpoints: 4
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -57,6 +58,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 1024
     max_breakpoints: 4
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -74,6 +76,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 4096
     max_breakpoints: 4
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -91,6 +94,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 512
     max_breakpoints: 4
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -118,6 +122,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 512
     max_breakpoints: 4
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -135,6 +140,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 4096
     max_breakpoints: 4
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -158,7 +164,17 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 1024
     max_breakpoints: 4
-    long_context_threshold_tokens: 200000
+    # Above 200k prompt tokens Anthropic reprices the whole request: input 2x and
+    # output 1.5x, with the cache multipliers re-derived off the tiered input
+    # rate. Confirmed identical across LiteLLM, models.dev and OpenRouter.
+    long_context:
+      threshold_tokens: 200000
+      input: "6.00"
+      output: "22.50"
+      cache_read_multiplier: "0.1"
+      cache_write_5m_multiplier: "1.25"
+      cache_write_1h_multiplier: "2.0"
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -176,6 +192,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: 1024
     max_breakpoints: 4
+    tokenizer: Claude
     last_verified: 2026-09-05
     source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
 
@@ -200,6 +217,18 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: null
     max_breakpoints: null
+    # Above 272k prompt tokens the whole request reprices: input 2x, output 1.5x.
+    # models.dev still labels its key `context_over_200k`, but its own structured
+    # `tiers` array says 272000 — matching LiteLLM and OpenRouter's
+    # `min_prompt_tokens`. The stale key name is not the threshold.
+    long_context:
+      threshold_tokens: 272000
+      input: "10.00"
+      output: "45.00"
+      cache_read_multiplier: "0.1"
+      cache_write_5m_multiplier: null
+      cache_write_1h_multiplier: null
+    tokenizer: GPT
     last_verified: 2026-09-05
     source_url: https://platform.openai.com/docs/pricing
 
@@ -217,6 +246,15 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: null
     max_breakpoints: null
+    # Same 272k boundary and the same 2x / 1.5x shape as gpt-5.5.
+    long_context:
+      threshold_tokens: 272000
+      input: "60.00"
+      output: "270.00"
+      cache_read_multiplier: "0.1"
+      cache_write_5m_multiplier: null
+      cache_write_1h_multiplier: null
+    tokenizer: GPT
     last_verified: 2026-09-05
     source_url: https://platform.openai.com/docs/pricing
 
@@ -234,6 +272,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: null
     max_breakpoints: null
+    tokenizer: GPT
     last_verified: 2026-09-05
     source_url: https://platform.openai.com/docs/pricing
 
@@ -251,6 +290,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: null
     max_breakpoints: null
+    tokenizer: GPT
     last_verified: 2026-09-05
     source_url: https://platform.openai.com/docs/pricing
 
@@ -271,6 +311,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: null
     max_breakpoints: null
+    tokenizer: GPT
     last_verified: 2026-09-05
     source_url: https://platform.openai.com/docs/pricing
 
@@ -288,6 +329,7 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: null
     max_breakpoints: null
+    tokenizer: GPT
     last_verified: 2026-09-05
     source_url: https://platform.openai.com/docs/pricing
 
@@ -305,5 +347,6 @@ rows:
     batch_multiplier: "0.5"
     min_cacheable_tokens: null
     max_breakpoints: null
+    tokenizer: GPT
     last_verified: 2026-09-05
     source_url: https://platform.openai.com/docs/pricing

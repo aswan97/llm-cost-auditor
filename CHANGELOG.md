@@ -70,6 +70,19 @@ the merge if it is unchanged or undocumented here.
   cross-checked across three independent public feeds (LiteLLM, models.dev, OpenRouter)
   and matched exactly on everything all three carry.
 
+- **Long-context tiers are priced, not approximated.** Three rows reprice above a prompt
+  threshold — `claude-sonnet-4-5` above 200k, `gpt-5.5` and `gpt-5.5-pro` above 272k, all
+  at input x2 and output x1.5. Crossing reprices the *whole* request rather than the
+  excess, and only the prompt counts toward the threshold, so a long answer to a short
+  question stays on the base rate. Rows without a tier have verified absence of one: all
+  fifteen were checked against all three feeds. Tier rates drift-check like any other.
+
+- **Every row records its tokenizer**, and `pricing.token_counts_transferable()` is the
+  check a routing analyzer must call before comparing models. Token counts are portable
+  only inside a family: the same text tokenizes differently on Claude and GPT, so pricing
+  one model's counts at another's rates is wrong by whatever the two disagree by, silently
+  and in one direction on every request at once.
+
 - **`prices list` and `prices check`.** The check compares the bundled table against a
   public feed and prints what moved, exiting non-zero so a maintenance job can gate on it.
   It never writes a rate: auto-adopting a feed would stamp `last_verified` to say a human
