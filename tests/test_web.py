@@ -390,12 +390,29 @@ def test_a_run_with_no_records_says_so_rather_than_showing_zero(
     assert client.get(f"/api/runs/{run_id}/cost").status_code == 404
 
 
-def test_the_cost_panel_is_not_inlined_into_the_run_page(client: Any) -> None:
-    """Pricing walks every record, so the page must not wait on it."""
+def test_a_finished_run_fetches_the_panel_rather_than_waiting_on_it(client: Any) -> None:
+    """Pricing walks every record, so the manifest and coverage must not wait."""
     run_id = completed_run(client)
     body = client.get(f"/runs/{run_id}").text
     assert f'hx-get="/runs/{run_id}/cost"' in body
+    assert "Pricing records" in body, "the holding state names what is happening"
     assert "Baseline spend" not in body, "the panel arrives as a fragment, not inline"
+
+
+def test_an_unfinished_run_shows_one_holding_state_not_two(client: Any, workspace: Path) -> None:
+    """No flicker: the page renders the waiting panel the fragment would render.
+
+    An unfinished run is waiting on ingest, not on pricing. Showing
+    "Pricing records…" first and replacing it a moment later with "Waiting for
+    ingest" is two messages for one situation, and the first of them is wrong.
+    """
+    from llm_cost_auditor.run_store import RunRequest, RunStore
+
+    record = RunStore(workspace).create(RunRequest(connection_ids=["local-anthropic"]))
+    body = client.get(f"/runs/{record.run_id}").text
+    assert "Waiting for" in body, "the real state is rendered server-side"
+    assert "Pricing records" not in body, "and not behind a placeholder that contradicts it"
+    assert 'hx-trigger="every 2s"' in body, "it still refreshes itself into the table"
 
 
 # --- the panel has to catch up with a run that was not finished yet ------------
