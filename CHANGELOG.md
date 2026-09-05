@@ -9,7 +9,55 @@ the merge if it is unchanged or undocumented here.
 
 ## [Unreleased]
 
+### Added
+- **Ingest, end to end, for local files and Anthropic logs.** The first working slice of
+  the engine (SPEC.md §6): the local-files connector with window pruning and source-scope
+  confinement; a shared decode layer detecting compression (gzip/bzip2/zstd) and container
+  format (JSON Lines, JSON) per object and reporting what it chose; the Anthropic source
+  adapter, including the per-TTL cache-creation breakdown and the §6.2 unknown-TTL-class
+  rule; and retry-versus-duplicate-delivery classification on billing facts (§6.5.1).
+  Connectors move bytes and know nothing about providers; adapters interpret records and
+  know nothing about where they came from, and a test asserts both.
+
+- **The run store, and coverage that gates on it.** Runs are directories holding
+  `run.json`, `manifest.json`, `records.parquet`, and `log.jsonl` (§5.3), with stages that
+  run once and in order, a threaded single-worker queue, and startup reconciliation that
+  marks interrupted runs rather than resuming them (§5.4). Coverage is computed from the
+  manifest, not from what succeeded: any unread object makes the baseline a stated lower
+  bound and withholds the projection, and past `coverage.max_missing_pct` the run is
+  `incomplete` (§6.1, §11.4).
+
+- **The `RecordStore` and `RunStore` seams**, kept separate (§5.1). Records are Parquet +
+  polars with every count column explicitly `Int64`, so no inference can make a count a
+  float.
+
+- **The CLI** — `sources`, `connections` (list/add/rm/test/peek), `ingest`, `runs`
+  (list/show/records/rm), `serve` — with `--window` interpreted in a declared timezone and
+  no implicit "most recent ingest" anywhere (§13.3). `ingest` exits 2 when coverage is
+  incomplete, so a CI gate can tell "withheld" from "failed".
+
+- **The web app, first iteration** (§13.1): Runs, Connections, New run with a pre-flight
+  object/byte estimate, and Run detail with live progress, the coverage panel, the slice
+  table, and the manifest. Server-rendered Jinja + HTMX with every asset served from the
+  package, CSRF protection on state-changing routes, a CSP that forbids external origins,
+  and a read-only `/api/sources` with no write counterpart. It renders **only what ingest
+  produces** — no findings pages and no dollar figures, because no analyzer exists yet and
+  mock data in a template is the failure this project is trying to prevent.
+
+- **Privacy protections at ingest** (§12): prompt text is hashed at segment boundaries and
+  discarded, label values are redacted before storage, and tests assert the *absence* of
+  prompt text, email addresses, and credential-shaped strings in every run artifact.
+
+- **Hand-computed ingest fixtures** in `tests/fixtures/anthropic/`, with the arithmetic for
+  every expected value derived line by line in a README alongside them, asserted exactly.
+
+- **Docker** as the reference environment for running and testing the platform:
+  `docker compose run --rm test`, `... run --rm cli <args>`, `... up app`.
+
 ### Changed
+- CI no longer self-skips mypy and pytest; the scaffolding guards are removed now that the
+  first module has landed.
+
 - **Design: the auditor is a self-hosted platform, not an offline CLI.** A local-first,
   single-tenant web app (FastAPI + Jinja + HTMX) and the CLI are two drivers over one run
   engine, with runs as durable artifacts in a filesystem run store. SPEC.md §1, §3, §4,

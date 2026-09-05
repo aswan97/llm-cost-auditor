@@ -48,9 +48,17 @@ Every PR into `develop` or `main` must pass, on Python 3.12 and 3.13:
 | **pytest** | Tests with a coverage floor (80%), including the hand-computed fixture suite (AGENTS.md) |
 | **price-literal guard** | `scripts/check_price_literals.py` — fails the build on a numeric price, rate, or multiplier bound outside the pricing module |
 
-The mypy and pytest steps currently self-skip while the repo has no `src/` tree
-and no tests. **Remove those guards in the PR that adds the first module** —
-they exist to keep CI honest during scaffolding, not to stay forever.
+The gates run unconditionally — the self-skip guards that covered the empty
+scaffold were removed with the first module.
+
+Docker is the reference environment for running and testing the platform, and
+it pins the same Python 3.12 as the lower CI matrix leg:
+
+```bash
+docker compose run --rm test           # ruff, mypy, and the test suite
+docker compose run --rm cli <args...>  # any CLI command
+docker compose up app                  # http://127.0.0.1:8787
+```
 
 ## Release process (develop → main)
 

@@ -30,7 +30,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,web,zstd]"
 
       - name: Lint (ruff)
         run: |
@@ -38,20 +38,10 @@ jobs:
           ruff format --check .
 
       - name: Type check (mypy strict)
-        run: |
-          if [ ! -d src ]; then
-            echo "::notice::No src/ tree yet — skipping mypy. Remove this guard once the first module lands."
-            exit 0
-          fi
-          mypy
+        run: mypy
 
       - name: Tests + coverage
-        run: |
-          if [ -z "$(find tests -name 'test_*.py' -print -quit 2>/dev/null)" ]; then
-            echo "::notice::No tests yet — skipping. Remove this guard once the first module lands."
-            exit 0
-          fi
-          pytest --cov=llm_cost_auditor --cov-report=term-missing --cov-fail-under=80
+        run: pytest --cov=llm_cost_auditor --cov-report=term-missing --cov-fail-under=80
 
   price-literals:
     name: Price-literal guard
