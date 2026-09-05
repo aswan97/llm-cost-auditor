@@ -1,0 +1,352 @@
+# The price table (SPEC.md §7.1). Data, never code — this file and the user's
+# commercial overlay are the only places a monetary rate exists in the system.
+#
+# HOW THESE ROWS WERE PRODUCED
+#
+# Each rate was transcribed after agreeing across three independent public
+# feeds — the LiteLLM catalog, models.dev, and OpenRouter. Every value below
+# that appears in more than one of them matched exactly; none were averaged,
+# and none were taken on a single source's word where a second was available.
+# `source_url` points at the provider's own page, which is what a human checks
+# against when bumping `last_verified` — the feeds are a cross-check and a
+# drift alarm, never the authority (`llm-cost-auditor prices check`).
+#
+# Multipliers are derived, not transcribed: a provider publishes an absolute
+# cache-read price, and the ratio to that row's own input rate is what goes
+# here. That keeps a rate change from silently rewriting a discount.
+#
+# `null` means *not applicable to this model*, and is never a synonym for zero.
+# A null multiplier makes a lookup fail loudly rather than price a token class
+# the provider does not sell.
+
+version: "2026-09-05"
+
+rows:
+  # --- Anthropic (first-party) ---------------------------------------------
+  # Cache reads are 0.1x input and cache writes 1.25x (5m) / 2.0x (1h) across
+  # the line, with one deliberate exception noted on claude-fable-5-1.
+
+  - model: claude-opus-5
+    provider: anthropic
+    effective_from: 2026-07-24
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "5.00"
+    output: "25.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 512
+    max_breakpoints: 4
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  - model: claude-sonnet-5
+    provider: anthropic
+    effective_from: 2026-06-30
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "2.00"
+    output: "10.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 1024
+    max_breakpoints: 4
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  - model: claude-haiku-4-5
+    provider: anthropic
+    effective_from: 2025-10-15
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "1.00"
+    output: "5.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 4096
+    max_breakpoints: 4
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  - model: claude-fable-5
+    provider: anthropic
+    effective_from: 2026-06-09
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "10.00"
+    output: "50.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 512
+    max_breakpoints: 4
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  # Cache reads here are 0.025x input, not the 0.1x every other Anthropic row
+  # uses. That is correct and deliberate, not a transcription slip: $0.25/MTok
+  # against a $10.00/MTok input rate, agreed by all three feeds and confirmed
+  # against the published figure on 2026-09-05.
+  #
+  # Left as a comment because the value looks wrong at a glance, and the obvious
+  # "fix" — making it 0.1 like its siblings — would quadruple the cache-read
+  # cost of every Fable 5.1 request and make prefix caching look four times less
+  # worthwhile than it is. `test_fable_5_1_cache_reads_are_deliberately_off_pattern`
+  # fails if anyone tidies it.
+  - model: claude-fable-5-1
+    provider: anthropic
+    effective_from: 2026-09-01
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "10.00"
+    output: "50.00"
+    cache_read_multiplier: "0.025"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 512
+    max_breakpoints: 4
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  - model: claude-opus-4-5
+    provider: anthropic
+    effective_from: 2025-11-24
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "5.00"
+    output: "25.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 4096
+    max_breakpoints: 4
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  # Still the most-deployed Sonnet, so it is priced even though newer rows exist.
+  # It is also the only model here with a long-context tier: above 200k input
+  # tokens Anthropic bills input, output, cache read and cache write at higher
+  # rates. This row carries none of those, so `long_context_threshold_tokens`
+  # makes a request above the boundary report as partially priced instead of
+  # being quietly charged the base rate.
+  - model: claude-sonnet-4-5
+    provider: anthropic
+    effective_from: 2025-09-29
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "3.00"
+    output: "15.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 1024
+    max_breakpoints: 4
+    # Above 200k prompt tokens Anthropic reprices the whole request: input 2x and
+    # output 1.5x, with the cache multipliers re-derived off the tiered input
+    # rate. Confirmed identical across LiteLLM, models.dev and OpenRouter.
+    long_context:
+      threshold_tokens: 200000
+      input: "6.00"
+      output: "22.50"
+      cache_read_multiplier: "0.1"
+      cache_write_5m_multiplier: "1.25"
+      cache_write_1h_multiplier: "2.0"
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  - model: claude-sonnet-4-6
+    provider: anthropic
+    effective_from: 2026-02-17
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "3.00"
+    output: "15.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 1024
+    max_breakpoints: 4
+    tokenizer: Claude
+    last_verified: 2026-09-05
+    source_url: https://docs.anthropic.com/en/docs/about-claude/models/overview
+
+  # --- OpenAI (first-party) -------------------------------------------------
+  # OpenAI's prompt caching is automatic and free to write, so the cache-write
+  # multipliers are null rather than zero: there is no write to bill, and no
+  # breakpoint to place. `min_cacheable_tokens` is null because no public feed
+  # carries it; the automatic-cache threshold has to be read off OpenAI's own
+  # caching page and verified before a cache analyzer can use it (see README).
+
+  - model: gpt-5.5
+    provider: openai
+    effective_from: 2026-04-24
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "5.00"
+    output: "30.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    # Above 272k prompt tokens the whole request reprices: input 2x, output 1.5x.
+    # models.dev still labels its key `context_over_200k`, but its own structured
+    # `tiers` array says 272000 — matching LiteLLM and OpenRouter's
+    # `min_prompt_tokens`. The stale key name is not the threshold.
+    long_context:
+      threshold_tokens: 272000
+      input: "10.00"
+      output: "45.00"
+      cache_read_multiplier: "0.1"
+      cache_write_5m_multiplier: null
+      cache_write_1h_multiplier: null
+    tokenizer: GPT
+    last_verified: 2026-09-05
+    source_url: https://platform.openai.com/docs/pricing
+
+  - model: gpt-5.5-pro
+    provider: openai
+    effective_from: 2026-04-24
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "30.00"
+    output: "180.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    # Same 272k boundary and the same 2x / 1.5x shape as gpt-5.5.
+    long_context:
+      threshold_tokens: 272000
+      input: "60.00"
+      output: "270.00"
+      cache_read_multiplier: "0.1"
+      cache_write_5m_multiplier: null
+      cache_write_1h_multiplier: null
+    tokenizer: GPT
+    last_verified: 2026-09-05
+    source_url: https://platform.openai.com/docs/pricing
+
+  - model: gpt-5.1
+    provider: openai
+    effective_from: 2025-11-13
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "1.25"
+    output: "10.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    tokenizer: GPT
+    last_verified: 2026-09-05
+    source_url: https://platform.openai.com/docs/pricing
+
+  - model: gpt-5
+    provider: openai
+    effective_from: 2025-08-07
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "1.25"
+    output: "10.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    tokenizer: GPT
+    last_verified: 2026-09-05
+    source_url: https://platform.openai.com/docs/pricing
+
+  # gpt-5-pro has no cached-input rate in any feed: the model is not offered
+  # with prompt caching, so a cache read against it is a lookup failure rather
+  # than a discount.
+  - model: gpt-5-pro
+    provider: openai
+    effective_from: 2025-10-06
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "15.00"
+    output: "120.00"
+    cache_read_multiplier: null
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    tokenizer: GPT
+    last_verified: 2026-09-05
+    source_url: https://platform.openai.com/docs/pricing
+
+  - model: gpt-5-mini
+    provider: openai
+    effective_from: 2025-08-07
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "0.25"
+    output: "2.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    tokenizer: GPT
+    last_verified: 2026-09-05
+    source_url: https://platform.openai.com/docs/pricing
+
+  - model: gpt-5-nano
+    provider: openai
+    effective_from: 2025-08-07
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "0.05"
+    output: "0.40"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: null
+    cache_write_1h_multiplier: null
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: null
+    max_breakpoints: null
+    tokenizer: GPT
+    last_verified: 2026-09-05
+    source_url: https://platform.openai.com/docs/pricing

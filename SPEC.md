@@ -496,7 +496,28 @@ All prices live in a **single versioned price table** — data, never code. It i
 
 **Staleness is surfaced, never silent.** Every report states the catalog version and the oldest `last_verified` date among the rows actually used. Rows older than a configurable threshold (default 90 days) raise a warning on the affected findings; rows with no matching entry for a model produce a *missing price* coverage entry rather than a guessed number — an unpriced model is excluded from savings math and reported as such.
 
-**Loaded on demand, not per session.** The table is not parsed at import or CLI startup. The pricing module lazily loads and memoizes only the rows it is asked for — keyed by `(provider, model, timestamp)` — on first lookup, so a run that touches four models never reads the rest of the catalog. `refresh-prices` is an explicit, separate command that updates the bundled table and bumps `last_verified`; a normal `audit` run never fetches anything.
+**Loaded on demand, not per session.** The table is not parsed at import or CLI startup. The pricing module lazily loads and memoizes only the rows it is asked for — keyed by `(provider, model, timestamp)` — on first lookup, so a run that touches four models never reads the rest of the catalog. A normal `audit` run never fetches anything.
+
+**Refresh reports drift; it never adopts it.** `prices check` fetches a public pricing feed, derives the same figures our rows hold, and prints where the two disagree, exiting non-zero so a maintenance job can gate on it. It does not write a rate. Auto-adopting a feed would stamp `last_verified` fresh — asserting that a human had checked the provider's page when none had — and a single upstream typo would reprice every finding in every report at once, confidently and invisibly. A human resolves each disagreement against the row's own `source_url` and edits the catalog by hand.
+
+Seeding a row works the same way: transcribe only what more than one independent feed agrees on, and treat a lone source as unverified. The rows shipped in v1 were cross-checked across three (LiteLLM, models.dev, OpenRouter) and matched exactly on every value all three carry.
+
+**Three dimensions the public feeds cannot supply**, each stated rather than guessed:
+
+- **No feed carries history.** They publish today's list, so `effective_from` / `effective_to` is ours to maintain, accumulated as changes are observed. A request whose timestamp falls outside every row for its model is *unpriced and reported*, never repriced at today's rate.
+- **No feed carries batch multipliers** for first-party Anthropic or OpenAI rows. `prices check` reports them as unverifiable rather than silently skipping them.
+- **Long-context tiers move, and the feeds name them inconsistently.** The tier rates themselves are carried (see below), but the *threshold* is spelled into the feed's field names, so a provider moving the boundary makes the tier fields go quiet rather than disagree. `prices check` reports that as unverifiable, which is honest — it is not a matching price.
+
+**`null` is never zero.** A multiplier absent from a row means the provider does not sell that token class — OpenAI's prompt caching is automatic and has no write to bill — and asking for it is an error. Defaulting it to zero would price a whole token class at nothing and read as a saving.
+
+**Long-context tiers are part of the row.** Several models reprice above a prompt-size threshold — `claude-sonnet-4-5` above 200k, `gpt-5.5` and `gpt-5.5-pro` above 272k, all at input x2 and output x1.5. A row may carry a `long_context` block holding the tier's own rates and multipliers, and two rules govern it:
+
+- **The reprice is wholesale, not marginal.** Crossing the threshold prices the *entire* request at the tier rate rather than charging only the excess tokens. Both providers bill it this way, and the marginal reading understates a 300k-token request by roughly a third — a plausible-looking number with nothing in the output to flag it.
+- **Only the prompt counts toward the threshold**: input, cache reads and cache writes. Output is billed at the tier's output rate but never pushes a request across, so a long answer to a short question stays on the base rate.
+
+A row with no `long_context` block has **verified absence** of a tier, not an unknown one: every bundled row was checked against all three feeds for one. Cache multipliers inside a tier are re-derived off the *tiered* input rate, not the base rate.
+
+**Token counts are not portable across tokenizer families.** Every row records the `tokenizer` that produced the counts it prices. The same text tokenizes differently on Claude and on GPT, so multiplying one model's logged token counts by another model's rates is wrong by whatever the two tokenizers disagree by — silently, in the direction of whichever is more compact, on every request at once. `pricing.token_counts_transferable()` is the check, and a routing analyzer (§10.2) must call it before any cross-model comparison. Crossing families requires re-tokenizing the prompt with the target model's tokenizer, which needs Tier A content (§6.3) and is therefore impossible on billing-only logs — an analyzer that cannot re-tokenize must stay inside a family or decline the comparison and say why. The same applies to the tier thresholds above: whether a prompt crosses 272k is itself a tokenizer-dependent question.
 
 **Consumption rule.** Analyzers never see raw numbers. They call `pricing.rate(provider, model, at=timestamp)` and `pricing.multiplier(...)`, so a price change, a new broker, or a new discount class never requires touching analyzer code.
 
