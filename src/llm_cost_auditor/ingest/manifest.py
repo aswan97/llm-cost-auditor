@@ -27,11 +27,19 @@ percentage — the named object is the honest signal, the ratio is the trigger.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..records import Fidelity
+from ..window import Window
+
+# How much of an edge of the requested window may go unobserved before the run
+# says so. Logs rarely start at midnight, so warning on any gap at all would
+# warn on every healthy run — and a panel that always warns is one nobody
+# reads. A whole missing day is the smallest gap that is a fact about the data
+# rather than about when traffic happened to start.
+_EDGE_GAP = timedelta(days=1)
 
 
 class ObjectEntry(BaseModel):
@@ -174,4 +182,67 @@ class Coverage(BaseModel):
             self.warnings.append(
                 f"{uri} matched no objects in the requested window. The tool cannot distinguish "
                 f"'no traffic' from 'no logs delivered' (§15.9)."
+            )
+
+    def describe_window_coverage(
+        self,
+        *,
+        window: Window | None,
+        observed_start: datetime | None,
+        observed_end: datetime | None,
+        records: int,
+    ) -> None:
+        """State how far the observed data actually reaches into the window (§6.6).
+
+        An empty listing already says so, but it is only the loudest version of
+        the problem. Objects that exist, decode cleanly, and hold nothing in the
+        window produce the same silence, and so does a window whose last three
+        weeks were never delivered — a run reporting on nine days of a
+        thirty-one-day window is the §15.9 failure mode, and the number gets
+        quoted as a month either way.
+
+        None of this is a coverage *failure*: the bytes were read and the
+        records are what they are, so gating is untouched. It is stated so the
+        gap is visible rather than inferred from a total nobody cross-checks.
+        """
+        if window is None:
+            return
+
+        if records == 0 and self.read_objects > 0:
+            if self.records_outside_window > 0:
+                self.warnings.append(
+                    f"No records fall inside {window.describe()}: all "
+                    f"{self.records_outside_window} record(s) decoded from "
+                    f"{self.read_objects} object(s) are outside it. The logs are readable, "
+                    f"so this is a window that does not match the data rather than missing "
+                    f"data (§6.6)."
+                )
+            else:
+                self.warnings.append(
+                    f"{self.read_objects} object(s) were read and yielded no records at all. "
+                    f"The tool cannot distinguish 'no traffic' from 'no logs delivered' "
+                    f"(§15.9)."
+                )
+            return
+
+        if observed_start is None or observed_end is None:
+            return
+
+        # `window.end` is the exclusive bound, so the trailing gap is measured
+        # against it directly.
+        leading = observed_start - window.start
+        trailing = window.end - observed_end
+        gaps: list[str] = []
+        if leading >= _EDGE_GAP:
+            gaps.append(f"{leading.days} day(s) at the start")
+        if trailing >= _EDGE_GAP:
+            gaps.append(f"{trailing.days} day(s) at the end")
+
+        if gaps:
+            self.warnings.append(
+                f"The observed data does not reach the requested window: "
+                f"{' and '.join(gaps)} of {window.describe()} contain no records. "
+                f"Observed {observed_start.isoformat()} .. {observed_end.isoformat()}. "
+                f"A per-day or monthly figure derived from this run covers the observed "
+                f"range, not the requested one (§6.6, §15.9)."
             )

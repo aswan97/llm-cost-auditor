@@ -50,6 +50,13 @@ def stored_records(workspace: Path, run_id: str) -> list[Any]:
     return list(store.iter_records())
 
 
+def _only(fragment: str, warnings: list[str]) -> str:
+    """The one warning containing `fragment`, failing if it is absent or doubled."""
+    matches = [w for w in warnings if fragment in w]
+    assert len(matches) == 1, f"expected exactly one {fragment!r} warning, got {matches}"
+    return matches[0]
+
+
 # --- the totals ---------------------------------------------------------------
 
 
@@ -316,6 +323,62 @@ def test_prefix_with_nothing_in_the_window_says_so(workspace: Path, tmp_path: Pa
     assert run.record_count == 0
     assert run.coverage is not None
     assert any("matched no objects" in w for w in run.coverage.warnings)
+
+
+def test_objects_that_hold_nothing_in_the_window_say_so(workspace: Path) -> None:
+    """The quiet version of the same failure: readable logs, wrong window (§6.6).
+
+    An empty listing is loud. Objects that list, decode, and hold nothing in the
+    window are silent — same zero records, same `complete` status — and the run
+    would otherwise report on nothing without ever saying the window missed the
+    data that was sitting right there.
+    """
+    _, run = run_ingest(workspace, window_spec="2026-01-01..2026-01-31")
+
+    assert run.record_count == 0
+    assert run.coverage is not None
+    # Readable bytes throughout, so this is emphatically not a coverage failure.
+    assert run.coverage.read_objects == 1
+    assert run.coverage.missing_bytes == 0
+    assert run.coverage.baseline_is_lower_bound is False
+    # All 14 raw lines, not the 13 the August window keeps: `req_out_of_window`
+    # sits in July and is outside this window too.
+    assert run.coverage.records_outside_window == 14
+
+    warning = _only("No records fall inside", run.coverage.warnings)
+    assert "2026-01-01..2026-01-31 (UTC)" in warning
+    assert "14 record(s)" in warning
+
+
+def test_a_window_the_data_does_not_reach_is_stated(workspace: Path) -> None:
+    """Nine days of a thirty-one-day window still gets quoted as a month (§15.9).
+
+    The fixture traffic is a single August day, so all but one day of the
+    requested month is unobserved at the trailing edge.
+    """
+    _, run = run_ingest(workspace, window_spec=WINDOW)
+
+    assert run.record_count > 0
+    assert run.coverage is not None
+    warning = _only("does not reach the requested window", run.coverage.warnings)
+    assert "at the end" in warning
+    assert "at the start" not in warning
+    # Stated, never gated: every listed byte was read.
+    assert run.coverage.baseline_is_lower_bound is False
+    assert run.status is not RunStatus.INCOMPLETE
+
+
+def test_a_window_the_data_fills_warns_about_nothing(workspace: Path) -> None:
+    """A panel that warns on every healthy run is one nobody reads.
+
+    Logs do not start at midnight, so a same-day window has hours of gap at both
+    edges and must stay quiet. The threshold is a whole missing day.
+    """
+    _, run = run_ingest(workspace, window_spec="2026-08-01..2026-08-01")
+
+    assert run.record_count > 0
+    assert run.coverage is not None
+    assert not [w for w in run.coverage.warnings if "requested window" in w]
 
 
 def test_unlistable_location_forces_incomplete(workspace: Path, tmp_path: Path) -> None:

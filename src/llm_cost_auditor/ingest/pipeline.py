@@ -101,6 +101,17 @@ def ingest(
     coverage.apply_gating(max_missing_pct)
 
     result.slices = _summarize_slices(result.records)
+    # Needs the slices, which is why it follows gating rather than joining it:
+    # the observed range is derived from them, and it is the half of the
+    # window/observed comparison the manifest cannot supply on its own.
+    coverage.describe_window_coverage(
+        window=window,
+        observed_start=min(
+            (s.observed_start for s in result.slices if s.observed_start), default=None
+        ),
+        observed_end=max((s.observed_end for s in result.slices if s.observed_end), default=None),
+        records=len(result.records),
+    )
     report(
         "stage",
         {
