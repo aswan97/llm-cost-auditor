@@ -200,8 +200,16 @@ rows:
   # OpenAI's prompt caching is automatic and free to write, so the cache-write
   # multipliers are null rather than zero: there is no write to bill, and no
   # breakpoint to place. `min_cacheable_tokens` is null because no public feed
-  # carries it; the automatic-cache threshold has to be read off OpenAI's own
-  # caching page and verified before a cache analyzer can use it (see README).
+  # carries it, and the provider's pricing page does not state it either; the
+  # automatic-cache threshold has to be found and verified before a cache
+  # analyzer can use it (see README).
+  #
+  # ASSUME A 272k TIER ON ANY NEW OPENAI FRONTIER ROW. The long-context
+  # surcharge is a family property from gpt-5.4 onward, not a per-model quirk:
+  # gpt-5.4, 5.4-pro, 5.5, 5.5-pro, 5.6 and its variants, and gpt-6-astra all
+  # carry it at input 2x / output 1.5x above 272k. Only the older gpt-5.x rows
+  # below are untiered, and that was verified rather than assumed. When adding a
+  # model here, absence of a tier is the claim that needs evidence.
 
   - model: gpt-5.5
     provider: openai
@@ -230,7 +238,7 @@ rows:
       cache_write_1h_multiplier: null
     tokenizer: GPT
     last_verified: 2026-09-05
-    source_url: https://platform.openai.com/docs/pricing
+    source_url: https://developers.openai.com/api/docs/pricing
 
   - model: gpt-5.5-pro
     provider: openai
@@ -256,7 +264,7 @@ rows:
       cache_write_1h_multiplier: null
     tokenizer: GPT
     last_verified: 2026-09-05
-    source_url: https://platform.openai.com/docs/pricing
+    source_url: https://developers.openai.com/api/docs/pricing
 
   - model: gpt-5.1
     provider: openai
@@ -274,7 +282,7 @@ rows:
     max_breakpoints: null
     tokenizer: GPT
     last_verified: 2026-09-05
-    source_url: https://platform.openai.com/docs/pricing
+    source_url: https://developers.openai.com/api/docs/pricing
 
   - model: gpt-5
     provider: openai
@@ -292,7 +300,7 @@ rows:
     max_breakpoints: null
     tokenizer: GPT
     last_verified: 2026-09-05
-    source_url: https://platform.openai.com/docs/pricing
+    source_url: https://developers.openai.com/api/docs/pricing
 
   # gpt-5-pro has no cached-input rate in any feed: the model is not offered
   # with prompt caching, so a cache read against it is a lookup failure rather
@@ -313,7 +321,7 @@ rows:
     max_breakpoints: null
     tokenizer: GPT
     last_verified: 2026-09-05
-    source_url: https://platform.openai.com/docs/pricing
+    source_url: https://developers.openai.com/api/docs/pricing
 
   - model: gpt-5-mini
     provider: openai
@@ -331,7 +339,7 @@ rows:
     max_breakpoints: null
     tokenizer: GPT
     last_verified: 2026-09-05
-    source_url: https://platform.openai.com/docs/pricing
+    source_url: https://developers.openai.com/api/docs/pricing
 
   - model: gpt-5-nano
     provider: openai
@@ -349,4 +357,4 @@ rows:
     max_breakpoints: null
     tokenizer: GPT
     last_verified: 2026-09-05
-    source_url: https://platform.openai.com/docs/pricing
+    source_url: https://developers.openai.com/api/docs/pricing

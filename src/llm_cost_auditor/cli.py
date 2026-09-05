@@ -677,24 +677,38 @@ def prices_check(
     url: Annotated[
         str, typer.Option("--url", help="The feed to compare against.")
     ] = price_refresh.FEED_URL,
+    batch_url: Annotated[
+        str,
+        typer.Option(
+            "--batch-url", help="Feed used to verify batch multipliers. Empty string skips it."
+        ),
+    ] = price_refresh.BATCH_FEED_URL,
 ) -> None:
-    """Compare the bundled table against a public feed and report what moved.
+    """Compare the bundled table against public feeds and report what moved.
 
     This is the only command in the tool that reaches the network for pricing,
     and it never writes a rate: it prints disagreements for a human to check
     against each row's `source_url`. Auto-adopting a feed would stamp
     `last_verified` fresh to say a human had looked, which would be false.
 
-    Exits 1 when the two disagree, so a maintenance job can gate on it.
+    Two feeds, because one cannot see everything. The batch multiplier appears
+    in neither provider's machine-readable pricing, but a feed that lists each
+    model twice — standard and `:batch` — shows it as the ratio between them.
+
+    Exits 1 when the catalog and a feed disagree, so a maintenance job can gate
+    on it.
     """
     table = load_catalog()
     try:
         feed = price_refresh.fetch(url)
+        batch_feed = price_refresh.fetch_batch_feed(batch_url) if batch_url else None
     except AuditorError as exc:
         _fail(str(exc))
-    report = price_refresh.check(table, feed)
+    report = price_refresh.check(table, feed, batch_feed=batch_feed)
 
     _out(f"catalog {report.catalog_version} vs {report.feed_name}")
+    if report.batch_feed_name:
+        _out(f"batch multipliers vs {report.batch_feed_name}")
     _out(f"{report.rows_checked} in-force row(s) compared.")
     _out()
 
@@ -705,7 +719,7 @@ def prices_check(
         _out()
 
     if report.unverifiable:
-        _out(f"~ {len(report.unverifiable)} value(s) no feed carries at all:")
+        _out(f"~ {len(report.unverifiable)} value(s) no feed could confirm:")
         for name in sorted(set(report.unverifiable)):
             _out(f"    {name}")
         _out()

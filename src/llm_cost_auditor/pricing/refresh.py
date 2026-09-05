@@ -35,8 +35,18 @@ FEED_URL = (
 )
 FEED_NAME = "LiteLLM model_prices_and_context_window.json"
 
-# The feed quotes dollars per token; the catalog quotes dollars per MTok.
+# A second feed, for the one thing the first cannot check. LiteLLM carries no
+# batch pricing for first-party Anthropic or OpenAI rows, but OpenRouter lists
+# every model twice — `openai/gpt-5.5` and `openai/gpt-5.5:batch` — so the
+# multiplier is the ratio between the two, observed rather than assumed.
+BATCH_FEED_URL = "https://openrouter.ai/api/v1/models"
+BATCH_FEED_NAME = "OpenRouter model list (`:batch` variants)"
+
+# The feeds quote dollars per token; the catalog quotes dollars per MTok.
 _TOKENS_PER_MTOK = 1_000_000
+
+# Price classes whose std/batch ratio should all agree on the batch multiplier.
+_BATCH_RATIO_KEYS = ("prompt", "completion", "input_cache_read")
 
 
 class Drift(BaseModel):
@@ -64,6 +74,7 @@ class Report(BaseModel):
 
     catalog_version: str
     feed_name: str
+    batch_feed_name: str | None = None
     rows_checked: int
     drifts: tuple[Drift, ...] = ()
     unmatched: tuple[str, ...] = ()
@@ -88,6 +99,54 @@ def fetch(url: str = FEED_URL, *, timeout: int = 30) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AuditorError(f"pricing feed at {url} is not a JSON object.")
     return payload
+
+
+def fetch_batch_feed(url: str = BATCH_FEED_URL, *, timeout: int = 30) -> dict[str, Any]:
+    """Fetch the batch feed, reduced to `{model id: pricing}`."""
+    payload = fetch(url, timeout=timeout)
+    entries = payload.get("data")
+    if not isinstance(entries, list):
+        raise AuditorError(f"batch feed at {url} has no `data` list.")
+    return {
+        entry["id"]: entry.get("pricing", {})
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+
+
+def _batch_feed_ids(row: PriceRow) -> list[str]:
+    """Candidate ids for this row in the batch feed, most likely first.
+
+    The feed writes versions with a dot where the catalog uses a hyphen
+    (`claude-haiku-4-5` against `anthropic/claude-haiku-4.5`), so a trailing
+    `-<digit>-<digit>` gets its last hyphen swapped. Nothing rests on the guess
+    being right: a candidate is only used once its *base* prices corroborate the
+    row, so a wrong match is rejected rather than silently compared.
+    """
+    names = [row.model]
+    parts = row.model.rsplit("-", 2)
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        names.append(f"{parts[0]}-{parts[1]}.{parts[2]}")
+    return [f"{row.provider}/{name}" for name in names]
+
+
+def _batch_multiplier(standard: dict[str, Any], batched: dict[str, Any]) -> Decimal | None:
+    """The batch multiplier implied by one model's two listings.
+
+    Every price class that both listings carry must imply the *same* ratio. If
+    they disagree, the pair is not a clean discount and no multiplier is
+    returned — a half-verified number here would be worse than an unverified
+    one, because it would look checked.
+    """
+    ratios: set[Decimal] = set()
+    for key in _BATCH_RATIO_KEYS:
+        std, bat = _per_mtok(standard.get(key)), _per_mtok(batched.get(key))
+        if std is None or bat is None or std == 0:
+            continue
+        ratios.add((bat / std).normalize())
+    if len(ratios) != 1:
+        return None
+    return ratios.pop()
 
 
 def _plain(value: Decimal) -> str:
@@ -219,12 +278,67 @@ def _compare_row(row: PriceRow, entry: dict[str, Any]) -> list[Drift]:
     return drifts
 
 
-def check(catalog: Catalog, feed: dict[str, Any], *, at: datetime | None = None) -> Report:
+def _compare_batch(row: PriceRow, batch_feed: dict[str, Any]) -> tuple[Drift | None, str | None]:
+    """Check this row's batch multiplier against the two listings of the model.
+
+    Returns `(drift, unverifiable_reason)`, at most one of which is set. The
+    candidate id is only trusted once the feed's *standard* input and output
+    rates match the row's own — price agreement is what establishes that the two
+    sides are talking about the same model, so a bad id guess declines to answer
+    instead of comparing the wrong thing.
+    """
+    if row.batch_multiplier is None:
+        return None, None
+    label = f"{row.provider}/{row.model} batch_multiplier"
+
+    for candidate in _batch_feed_ids(row):
+        standard = batch_feed.get(candidate)
+        batched = batch_feed.get(f"{candidate}:batch")
+        if not isinstance(standard, dict) or not isinstance(batched, dict):
+            continue
+        if (
+            _per_mtok(standard.get("prompt")) != row.input.normalize()
+            or _per_mtok(standard.get("completion")) != row.output.normalize()
+        ):
+            return None, f"{label} — {candidate} base rates disagree with the catalog"
+
+        theirs = _batch_multiplier(standard, batched)
+        if theirs is None:
+            return None, f"{label} — {candidate} listings imply no single ratio"
+        ours = row.batch_multiplier.normalize()
+        if ours != theirs:
+            return (
+                Drift(
+                    provider=row.provider,
+                    model=row.model,
+                    field="batch_multiplier",
+                    catalog=_plain(ours),
+                    feed=_plain(theirs),
+                    source_url=row.source_url,
+                ),
+                None,
+            )
+        return None, None
+
+    return None, f"{label} — no `:batch` listing found"
+
+
+def check(
+    catalog: Catalog,
+    feed: dict[str, Any],
+    *,
+    batch_feed: dict[str, Any] | None = None,
+    at: datetime | None = None,
+) -> Report:
     """Compare every currently-in-force row against the feed.
 
     Only open-ended rows are checked: the feed is today's price list and has no
     history, so a superseded row disagreeing with it is correct behaviour, not
     drift.
+
+    `batch_feed` is optional because it is a second network call for one field.
+    Without it, batch multipliers are reported as unverifiable exactly as
+    before — never as agreeing.
     """
     moment = at or datetime.now(tz=None).astimezone()
     drifts: list[Drift] = []
@@ -241,12 +355,21 @@ def check(catalog: Catalog, feed: dict[str, Any], *, at: datetime | None = None)
             unmatched.append(f"{row.provider}/{row.model}")
             continue
         drifts += _compare_row(row, entry)
-        if row.batch_multiplier is not None:
-            unverifiable.append(f"{row.provider}/{row.model} batch_multiplier")
+
+        if batch_feed is None:
+            if row.batch_multiplier is not None:
+                unverifiable.append(f"{row.provider}/{row.model} batch_multiplier")
+        else:
+            drift, reason = _compare_batch(row, batch_feed)
+            if drift is not None:
+                drifts.append(drift)
+            if reason is not None:
+                unverifiable.append(reason)
 
     return Report(
         catalog_version=catalog.version,
         feed_name=FEED_NAME,
+        batch_feed_name=None if batch_feed is None else BATCH_FEED_NAME,
         rows_checked=checked,
         drifts=tuple(drifts),
         unmatched=tuple(unmatched),

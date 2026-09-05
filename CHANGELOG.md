@@ -83,6 +83,18 @@ the merge if it is unchanged or undocumented here.
   one model's counts at another's rates is wrong by whatever the two disagree by, silently
   and in one direction on every request at once.
 
+- **Batch multipliers are verified, not assumed.** A research pass found that a second
+  public feed lists every model twice — standard and `:batch` — so the multiplier is the
+  ratio between the two listings. `prices check` now uses both feeds and confirms all
+  fifteen at 0.5x against live data, where it previously reported them unverifiable. The
+  id in the second feed is trusted only once that model's standard rates corroborate the
+  row, so a wrong id declines to answer rather than comparing the wrong model. Skipping
+  the second feed still reports unverifiable — absence never reads as agreement.
+
+- **`source_url` for the seven OpenAI rows** now points at the page that actually serves
+  the pricing; the old one had become a 301 redirect, and a verification link that bounces
+  is one nobody follows.
+
 - **`prices list` and `prices check`.** The check compares the bundled table against a
   public feed and prints what moved, exiting non-zero so a maintenance job can gate on it.
   It never writes a rate: auto-adopting a feed would stamp `last_verified` to say a human
