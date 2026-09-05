@@ -1,0 +1,103 @@
+{# Baseline spend (SPEC.md §11.1), rendered from the same `baseline.compute()`
+   the CLI prints. Every figure here is formatted by `format_usd` on the model
+   itself — no arithmetic in this template, and no second opinion about
+   rounding.
+
+   Polls itself while the run is unfinished and stops once it is terminal, the
+   same shape as _live.html. Starting a run lands on the run page before any
+   record exists, so a fragment that rendered once would show "nothing to price"
+   for the whole run and never correct itself. #}
+<div id="cost"
+     {% if not run.status.terminal %}
+     hx-get="/runs/{{ run.run_id }}/cost" hx-trigger="every 2s" hx-swap="outerHTML"
+     {% endif %}>
+<div class="panel">
+  <h3>Baseline spend</h3>
+
+  {% if not run.status.terminal %}
+    {# Not an absence of data — an absence of data *yet*. Saying "nothing to
+       price" here would describe a run that is working perfectly as a failure. #}
+    <p class="muted">
+      Waiting for <span class="mono">{{ run.stage.value if run.stage else 'ingest' }}</span>
+      to finish — this run is {{ run.status.value }}. Spend is priced from the
+      records once they are written.
+    </p>
+  {% elif baseline is none %}
+    <p class="muted">
+      This run has no <code>records.parquet</code> — purged, or ingest did not
+      complete. Nothing to price.
+    </p>
+  {% elif not baseline.priced_records and not baseline.excluded %}
+    <p class="muted">This run produced no records to price.</p>
+  {% else %}
+
+  <p class="small muted">
+    catalog {{ baseline.catalog_version }} · oldest verification
+    {{ baseline.oldest_verification or '—' }}
+  </p>
+
+  <div class="scroll mt">
+    <table>
+      <thead>
+        <tr><th>Model</th><th class="num">Records</th><th class="num">Spend</th></tr>
+      </thead>
+      <tbody>
+        {% for row in baseline.by_model %}
+        <tr>
+          <td class="mono small">{{ row.label }}</td>
+          <td class="num">{{ row.records }}</td>
+          <td class="num">{{ row.spend }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td><strong>Total</strong></td>
+          <td class="num"><strong>{{ baseline.priced_records }}</strong></td>
+          <td class="num"><strong>{{ baseline.total }}</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  {# What the total does not include. Kept adjacent to the number rather than
+     footnoted, because a total that quietly dropped records is the failure this
+     tool exists to prevent. #}
+  {% if baseline.ttl_unknown_exposure_usd_micros %}
+  <div class="note warn mt">
+    <strong>Unknown cache-write TTL</strong>
+    Those writes are billed at the lowest premium class, so up to
+    {{ baseline.ttl_unknown_exposure }} more is possible (SPEC.md §6.2).
+  </div>
+  {% endif %}
+
+  {% for name, count in baseline.partially_priced %}
+  <div class="note warn mt">
+    <strong>Partially priced</strong>
+    {{ count }} record(s) carry <span class="mono">{{ name }}</span>, which this
+    catalog cannot price. The total above is a lower bound.
+  </div>
+  {% endfor %}
+
+  {% for item in baseline.excluded %}
+  <div class="note bad mt">
+    <strong>{{ item.records }} record(s) excluded</strong>
+    <span class="mono small">{{ item.label }}</span> — {{ item.explanation }}
+  </div>
+  {% endfor %}
+
+  {% if not baseline.has_caveats %}
+  <p class="small muted mt">Every record was priced, with no unpriced dimensions.</p>
+  {% endif %}
+
+  <div class="actions mt">
+    <a class="btn" href="/api/runs/{{ run.run_id }}/cost">cost.json</a>
+  </div>
+
+  <p class="small muted mt">
+    Public list prices. No commercial overlay is applied (SPEC.md §7.2), so an
+    account with negotiated terms is priced high here.
+  </p>
+  {% endif %}
+</div>
+</div>

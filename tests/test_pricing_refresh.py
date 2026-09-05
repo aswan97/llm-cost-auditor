@@ -201,3 +201,97 @@ def test_a_moved_threshold_shows_up_as_the_tier_going_quiet() -> None:
         entry[key.replace("_above_2k_tokens", "_above_4k_tokens")] = entry.pop(key)
     report = refresh.check(pricing.catalog(CATALOG), moved, at=AT)
     assert report.clean, "no false disagreement"
+
+
+# --- the second feed: verifying batch multipliers ------------------------------
+
+
+def batch_feed(**overrides: Any) -> dict[str, Any]:
+    """Two listings per model, standard and `:batch`, as the feed publishes them.
+
+    The test catalog's in-force rows are $12/$48 (test-model), $10/$40
+    (test-nocache and test-tiered) and $0.05/$0.40 (test-cheap), all with a
+    declared batch multiplier of 0.5 — so every `:batch` listing is half.
+    """
+    base: dict[str, Any] = {
+        "testco/test-model": {"prompt": "1.2e-05", "completion": "4.8e-05"},
+        "testco/test-model:batch": {"prompt": "6e-06", "completion": "2.4e-05"},
+        "testco/test-nocache": {"prompt": "1e-05", "completion": "4e-05"},
+        "testco/test-nocache:batch": {"prompt": "5e-06", "completion": "2e-05"},
+        "testco/test-tiered": {"prompt": "1e-05", "completion": "4e-05"},
+        "testco/test-tiered:batch": {"prompt": "5e-06", "completion": "2e-05"},
+        "testco/test-cheap": {"prompt": "5e-08", "completion": "4e-07"},
+        "testco/test-cheap:batch": {"prompt": "2.5e-08", "completion": "2e-07"},
+    }
+    for key, fields in overrides.items():
+        base[key.replace("__", ":").replace("_", "-").replace("testco-", "testco/")].update(fields)
+    return base
+
+
+def test_batch_multipliers_are_verified_when_the_second_feed_is_given() -> None:
+    report = refresh.check(pricing.catalog(CATALOG), feed(), batch_feed=batch_feed(), at=AT)
+    assert report.clean
+    assert report.unverifiable == (), "nothing should be left unconfirmed"
+    assert report.batch_feed_name is not None
+
+
+def test_without_the_second_feed_batch_stays_unverifiable() -> None:
+    """Absence of the feed must never read as agreement."""
+    report = refresh.check(pricing.catalog(CATALOG), feed(), at=AT)
+    assert report.clean
+    assert all("batch_multiplier" in item for item in report.unverifiable)
+    assert report.batch_feed_name is None
+
+
+def test_a_moved_batch_discount_is_drift() -> None:
+    moved = batch_feed()
+    moved["testco/test-model:batch"] = {"prompt": "7.2e-06", "completion": "2.88e-05"}  # 0.6x
+    report = refresh.check(pricing.catalog(CATALOG), feed(), batch_feed=moved, at=AT)
+    (drift,) = report.drifts
+    assert drift.field == "batch_multiplier"
+    assert drift.catalog == "0.5"
+    assert drift.feed == "0.6"
+
+
+def test_listings_that_imply_two_different_ratios_confirm_nothing() -> None:
+    """A half-verified number is worse than an unverified one: it looks checked."""
+    inconsistent = batch_feed()
+    inconsistent["testco/test-model:batch"] = {"prompt": "6e-06", "completion": "3.6e-05"}
+    report = refresh.check(pricing.catalog(CATALOG), feed(), batch_feed=inconsistent, at=AT)
+    assert report.clean, "an incoherent pair is not a disagreement about the multiplier"
+    assert any("no single ratio" in item for item in report.unverifiable)
+
+
+def test_a_wrong_id_guess_declines_rather_than_comparing_the_wrong_model() -> None:
+    """Identity is established by the base rates agreeing, not by the name.
+
+    The id is guessed from the model name, so the guess has to be falsifiable.
+    Here the feed's `test-model` is priced like something else entirely, which
+    means it is not our row and no batch ratio may be taken from it.
+    """
+    impostor = batch_feed()
+    impostor["testco/test-model"] = {"prompt": "9.9e-05", "completion": "9.9e-05"}
+    report = refresh.check(pricing.catalog(CATALOG), feed(), batch_feed=impostor, at=AT)
+    assert report.clean
+    assert any("base rates disagree" in item for item in report.unverifiable)
+
+
+def test_a_model_absent_from_the_batch_feed_is_named() -> None:
+    thin = batch_feed()
+    del thin["testco/test-cheap:batch"]
+    report = refresh.check(pricing.catalog(CATALOG), feed(), batch_feed=thin, at=AT)
+    assert report.clean
+    assert any("no `:batch` listing found" in item for item in report.unverifiable)
+
+
+def test_the_dotted_version_id_is_tried_for_hyphenated_model_names() -> None:
+    """`claude-haiku-4-5` is `anthropic/claude-haiku-4.5` in the feed."""
+    assert refresh._batch_feed_ids(
+        pricing.catalog().find("anthropic", "claude-haiku-4-5", datetime(2026, 8, 1, tzinfo=UTC))
+    ) == ["anthropic/claude-haiku-4-5", "anthropic/claude-haiku-4.5"]
+
+
+def test_a_model_name_without_a_trailing_version_pair_is_not_rewritten() -> None:
+    assert refresh._batch_feed_ids(
+        pricing.catalog().find("openai", "gpt-5-mini", datetime(2026, 8, 1, tzinfo=UTC))
+    ) == ["openai/gpt-5-mini"]

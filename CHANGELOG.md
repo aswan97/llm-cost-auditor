@@ -83,6 +83,34 @@ the merge if it is unchanged or undocumented here.
   one model's counts at another's rates is wrong by whatever the two disagree by, silently
   and in one direction on every request at once.
 
+- **Baseline spend in the web app** (SPEC.md §11.1, §13.1). A run page now shows what its
+  traffic cost, by model, with the unknown-TTL exposure and every excluded record named
+  beside the total rather than footnoted — a total that has quietly dropped records is the
+  failure this tool exists to prevent. `GET /api/runs/{id}/cost` returns the same figures
+  as JSON, in integer micro-USD.
+
+  The arithmetic moved out of the CLI into `baseline.compute()`, which both surfaces now
+  format. Neither can drift from the other because neither does the sum: the app is a
+  driver, not a layer (AGENTS.md), and two copies of a money calculation disagree
+  eventually and silently. A test asserts the rendered figures, the JSON, and a direct
+  call agree figure by figure.
+
+  The panel loads as an HTMX fragment rather than inline, so a large run shows its
+  manifest and coverage while pricing is still walking records. A run with no
+  `records.parquet` reads as absent data, never as `$0.00`.
+
+- **Batch multipliers are verified, not assumed.** A research pass found that a second
+  public feed lists every model twice — standard and `:batch` — so the multiplier is the
+  ratio between the two listings. `prices check` now uses both feeds and confirms all
+  fifteen at 0.5x against live data, where it previously reported them unverifiable. The
+  id in the second feed is trusted only once that model's standard rates corroborate the
+  row, so a wrong id declines to answer rather than comparing the wrong model. Skipping
+  the second feed still reports unverifiable — absence never reads as agreement.
+
+- **`source_url` for the seven OpenAI rows** now points at the page that actually serves
+  the pricing; the old one had become a 301 redirect, and a verification link that bounces
+  is one nobody follows.
+
 - **`prices list` and `prices check`.** The check compares the bundled table against a
   public feed and prints what moved, exiting non-zero so a maintenance job can gate on it.
   It never writes a rate: auto-adopting a feed would stamp `last_verified` to say a human

@@ -35,6 +35,25 @@
 
 {% include "_live.html" %}
 
+{# Two paths, so the panel only ever shows one holding state rather than
+   flickering through two.
+
+   An unfinished run is waiting on ingest, not on pricing, and the fragment
+   already says exactly that — so render it inline and let it poll itself. A
+   separate "Pricing records…" placeholder here would be replaced a moment later
+   by different words meaning the same thing.
+
+   A finished run has records to walk, so that placeholder is accurate and the
+   panel is fetched once: pricing reads every record, and the manifest and
+   coverage should not wait behind it. #}
+{% if run.status.terminal %}
+<div id="cost" hx-get="/runs/{{ run.run_id }}/cost" hx-trigger="load" hx-swap="outerHTML">
+  <div class="panel muted">Pricing records…</div>
+</div>
+{% else %}
+{% with baseline = none %}{% include "_cost.html" %}{% endwith %}
+{% endif %}
+
 <div class="note">
   <strong>Later stages</strong>
   <code>profile</code> and <code>audit</code> are not implemented in this build,
