@@ -1,0 +1,33 @@
+# A test catalog, never the bundled one (AGENTS.md).
+#
+# One model, at rates chosen so the arithmetic is checkable in your head:
+# $10.00/MTok input means one input token costs exactly 10 uUSD, and
+# $40.00/MTok output means one output token costs exactly 40 uUSD. Every
+# expected value in README.md follows from those two numbers and the token
+# counts in traffic.jsonl.
+#
+# The provider is `anthropic` because these fixtures go through the real
+# Anthropic adapter, which sets the provider from the source. The model name is
+# obviously synthetic so nobody mistakes a fixture rate for a real one, and a
+# catalog refresh can never turn a green analyzer test red.
+
+version: "waste-test-1"
+
+rows:
+  - model: test-flat
+    provider: anthropic
+    effective_from: 2026-01-01
+    effective_to: null
+    currency: USD
+    units: per_mtok
+    input: "10.00"
+    output: "40.00"
+    cache_read_multiplier: "0.1"
+    cache_write_5m_multiplier: "1.25"
+    cache_write_1h_multiplier: "2.0"
+    batch_multiplier: "0.5"
+    min_cacheable_tokens: 1000
+    max_breakpoints: 4
+    tokenizer: TestTok
+    last_verified: 2026-01-01
+    source_url: https://example.invalid/pricing

@@ -134,8 +134,21 @@ def test_provenance_travels_with_the_number() -> None:
 def test_money_formats_once_and_only_for_display() -> None:
     assert baseline.format_usd(0) == "$0.00"
     assert baseline.format_usd(43_550) == "$0.04"
+    assert baseline.format_usd(5_000) == "$0.01"
     assert baseline.format_usd(9_460_000) == "$9.46"
     assert baseline.format_usd(1_234_567_890) == "$1,234.57"
+
+
+def test_a_real_amount_below_a_cent_never_renders_as_nothing() -> None:
+    """`$0.00` for money that was actually spent reads as "skip this row".
+
+    Two decimals is the right precision for a bill and the wrong one for a
+    single finding over a short window, and the difference between "nothing"
+    and "less than a cent" is the whole point of the figure.
+    """
+    assert baseline.format_usd(1) == "<$0.01"
+    assert baseline.format_usd(4_999) == "<$0.01"
+    assert baseline.format_usd(0) == "$0.00"
 
 
 def test_every_monetary_field_serializes_as_an_integer() -> None:

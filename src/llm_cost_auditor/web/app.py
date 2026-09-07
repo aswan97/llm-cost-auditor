@@ -59,7 +59,6 @@ from ..run_store import (
     RunRequest,
     RunStatus,
     RunStore,
-    Stage,
 )
 
 HERE = Path(__file__).parent
@@ -648,10 +647,8 @@ def _create_run(
             connection_ids=connection_ids,
             window=audit_window or None,
             timezone=timezone,
-            # The app always submits all three stages (§5.3); in this build
-            # only ingest exists, so that is where it stops — stated rather
-            # than implied by an empty findings page.
-            stop_after=Stage.INGEST,
+            # The app always submits all three stages (§5.3).
+            stop_after=None,
         )
     )
 

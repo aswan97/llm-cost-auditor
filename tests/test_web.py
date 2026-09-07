@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import time
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -353,9 +354,11 @@ def test_the_app_and_the_cli_agree_figure_by_figure(client: Any, workspace: Path
     ]
 
     html = client.get(f"/runs/{run_id}/cost").text
-    assert direct.total in html, "the rendered total must be the computed one"
+    # Escaped, because a sub-cent figure renders as `<$0.01` and Jinja escapes
+    # the `<`. The browser shows the same string the CLI prints.
+    assert escape(direct.total) in html, "the rendered total must be the computed one"
     for row in direct.by_model:
-        assert row.spend in html
+        assert escape(row.spend) in html
         assert row.label in html
 
 
