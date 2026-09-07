@@ -326,6 +326,12 @@ class FindingSet(BaseModel):
     catalog_version: str
     baseline_usd_micros: int = Field(default=0, ge=0)
 
+    # How many records the analyzers actually saw. Carried because "the
+    # analyzers looked and found nothing" and "nothing could be analyzed" are
+    # opposite facts that produce an identical empty finding list, and a
+    # consumer that cannot tell them apart will report the second as the first.
+    analyzed_records: int = Field(default=0, ge=0)
+
     findings: list[Finding] = Field(default_factory=list)
 
     # Analyzer x slice verdicts, so "why is there no cache finding for Bedrock"
@@ -343,13 +349,24 @@ class FindingSet(BaseModel):
         """The sum of marginals only — the one number that may be totalled."""
         return sum(f.savings.gross_marginal.expected_usd_micros for f in self.findings)
 
+    @property
+    def analyzed_nothing(self) -> bool:
+        """True when no record reached an analyzer — priced or otherwise."""
+        return self.analyzed_records == 0
+
     def by_confidence(self) -> dict[Confidence, int]:
-        """Marginal expected savings per tier, so a heuristic never enters a total silently."""
+        """Marginal expected savings per tier, so a heuristic never enters a total silently.
+
+        Ordered strongest tier first, here rather than at each call site: two
+        surfaces sorting the same table for themselves is two chances to sort
+        it differently, and a reader comparing the app against the CLI should
+        not have to work out whether a reordering means anything.
+        """
         totals: dict[Confidence, int] = {}
         for finding in self.findings:
             amount = finding.savings.gross_marginal.expected_usd_micros
             totals[finding.confidence] = totals.get(finding.confidence, 0) + amount
-        return totals
+        return {tier: totals[tier] for tier in Confidence if tier in totals}
 
     def digest(self) -> str:
         """A SHA-256 content digest over the finding set (§13.6).

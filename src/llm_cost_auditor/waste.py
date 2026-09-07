@@ -210,6 +210,7 @@ def analyze(
 
     priced, unpriced, oldest = _price(records, summary, slices, path)
     result.baseline_usd_micros = sum(item.cost_usd_micros for item in priced)
+    result.analyzed_records = len(priced)
 
     observed = [item.record.start_time for item in priced]
     window_days = _window_days(observed)

@@ -416,3 +416,43 @@ def test_an_unknown_timezone_is_a_config_error(workspace: Path) -> None:
         workspace=workspace,
     )
     assert result.exit_code == 1
+
+
+def test_an_unpriceable_run_never_reads_as_a_clean_bill_of_health(
+    tmp_path: Path, logs: Path
+) -> None:
+    """A model the catalog has never heard of excludes every record (§7.1).
+
+    The empty finding list that produces looks exactly like a run whose traffic
+    was clean, and saying so would be the confident-plausible-wrong-number
+    failure this whole tool exists to prevent — asserted on the words a user
+    actually reads, because that is where it went wrong.
+    """
+    unknown = tmp_path / "unknown-model"
+    unknown.mkdir()
+    (unknown / "traffic.jsonl").write_text(
+        '{"request_id":"a","timestamp":"2026-08-01T09:00:00Z","model":"no-such-model",'
+        '"http_status":500,"error":{"type":"api_error"},'
+        '"usage":{"input_tokens":1000,"output_tokens":200}}\n',
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "unknown-ws"
+    run("sources", "add", str(unknown), workspace=workspace)
+    run(
+        "connections",
+        "add",
+        "u",
+        "--uri",
+        str(unknown),
+        "--source",
+        "anthropic",
+        workspace=workspace,
+    )
+
+    result = run("run", "u", workspace=workspace)
+    assert result.exit_code == 0
+    assert "No record in this run could be analyzed" in result.stdout
+    assert "billed for work that was used" not in result.stdout
+    # An unpriced run and a free one are different facts.
+    assert "nothing priced" in result.stdout
+    assert "no catalog rate" in result.stdout

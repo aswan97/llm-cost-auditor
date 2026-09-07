@@ -253,6 +253,11 @@ def test_an_unpriced_model_is_named_rather_than_priced_at_zero(
     assert any("no catalog rate" in reason for reason in results.withheld_reasons)
     assert any("anthropic/test-flat" in reason for reason in results.withheld_reasons)
 
+    # The discriminator, without which this empty result is indistinguishable
+    # from a run whose traffic was genuinely clean.
+    assert results.analyzed_records == 0
+    assert results.analyzed_nothing
+
 
 def test_unread_objects_make_the_savings_a_stated_lower_bound(analyzed: FindingSet) -> None:
     """§6.1, §11.4: waste in an object nobody read is waste nobody counted."""
@@ -300,3 +305,10 @@ def test_no_records_produces_an_empty_finding_set_not_an_error() -> None:
     )
     assert results.findings == []
     assert results.portfolio_usd_micros == 0
+    assert results.analyzed_nothing
+
+
+def test_an_analyzed_run_is_not_reported_as_unanalyzed(analyzed: FindingSet) -> None:
+    """The other half of the discriminator: a real run must not read as empty."""
+    assert not analyzed.analyzed_nothing
+    assert analyzed.analyzed_records == 10

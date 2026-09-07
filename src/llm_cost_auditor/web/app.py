@@ -6,15 +6,16 @@ JavaScript. Routes read the run store and hand run records to templates; the
 work happens in the engine.
 
 **What this build renders is what the engine produces** — runs, connections, the
-source scope, live progress, the manifest, the coverage panel, and baseline
-spend priced from the catalog. There are still no findings pages, because no
-analyzer exists yet and a page that renders plausible fake numbers is the exact
-failure this project is trying to avoid (AGENTS.md).
+source scope, live progress, the manifest, the coverage panel, baseline spend
+priced from the catalog, the discovered workloads, and the waste findings of
+§9.1. Nothing here renders a figure an analyzer did not compute: a page of
+plausible fake numbers is the exact failure this project is trying to avoid
+(AGENTS.md), so a panel with nothing behind it says so instead.
 
-The cost panel is the first place two surfaces show the same money, so the
-arithmetic lives in `baseline.compute()` and both this app and `runs cost`
-merely format its result. Neither can drift from the other, because neither
-does the sum.
+The cost and findings panels are where two surfaces show the same money, so the
+arithmetic lives in `baseline.compute()` and in `findings.json` — both this app
+and the CLI merely format an integer someone else computed. Neither can drift
+from the other, because neither does the sum.
 
 Security posture, all of it deliberate (§12):
 
@@ -233,6 +234,50 @@ def create_app(workspace: Path) -> FastAPI:
                 detail=f"run {run_id} has no records.parquet (purged, or ingest did not complete)",
             )
         return result.model_dump(mode="json")
+
+    @application.get("/runs/{run_id}/findings", response_class=HTMLResponse)
+    def run_findings_fragment(request: Request, run_id: str) -> HTMLResponse:
+        """The findings panel, loaded into the run page by HTMX.
+
+        Renders `findings.json` and nothing else. The engine did the arithmetic
+        and wrote the file; this template formats integers into dollars and puts
+        them in a table. No analysis lives here, which is what makes the figures
+        on screen and the figures `runs findings` prints the same figures rather
+        than two agreeing implementations.
+        """
+        record = _lookup(runs, run_id)
+        return page(
+            request,
+            "_findings.html",
+            run=record,
+            findings=runs.read_findings(run_id),
+            format_usd=baseline.format_usd,
+        )
+
+    @application.get("/api/runs/{run_id}/findings")
+    def api_run_findings(run_id: str) -> dict[str, Any]:
+        """`findings.json` for a run, verbatim (§13.4).
+
+        A 409 while the audit has not run: the findings do not exist *yet*,
+        which a caller should retry, as against a run that will never have any.
+        """
+        record = _lookup(runs, run_id)
+        results = runs.read_findings(run_id)
+        if results is None:
+            if not record.status.terminal:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"run {run_id} is {record.status.value}; the audit stage has not run",
+                )
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"run {run_id} has no findings.json. It stopped before the audit stage — "
+                    f"run `audit --run {run_id}`, or check the coverage panel for why savings "
+                    f"were withheld (SPEC.md §11.4)."
+                ),
+            )
+        return results.model_dump(mode="json")
 
     @application.get("/runs/{run_id}/live", response_class=HTMLResponse)
     def run_live_fragment(request: Request, run_id: str) -> HTMLResponse:

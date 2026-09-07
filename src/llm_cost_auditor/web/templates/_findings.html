@@ -1,0 +1,186 @@
+{# The finding set (SPEC.md §13.4), rendered from `findings.json` and nothing
+   else. Every dollar figure here is `format_usd` applied to an integer the
+   engine computed — no arithmetic in this template, so the numbers on screen
+   and the numbers `runs findings` prints cannot drift apart.
+
+   Polls while the run is unfinished and stops once it is terminal, the same
+   shape as _cost.html: a run page opened the moment a run starts must correct
+   itself rather than showing "no findings" forever. #}
+<div id="findings"
+     {% if not run.status.terminal %}
+     hx-get="/runs/{{ run.run_id }}/findings" hx-trigger="every 2s" hx-swap="outerHTML"
+     {% endif %}>
+<div class="panel">
+  <h3>Findings</h3>
+
+  {% if findings is none %}
+    {% if not run.status.terminal %}
+    <p class="muted">
+      Waiting for the <span class="mono">audit</span> stage — this run is
+      {{ run.status.value }} at
+      <span class="mono">{{ run.stage.value if run.stage else 'ingest' }}</span>.
+    </p>
+    {% elif run.coverage and run.coverage.incomplete %}
+    {# Not "no findings" — savings were withheld, which is a different fact and
+       the reader must not read one as the other (§11.4). #}
+    <div class="note bad">
+      <strong>Savings withheld</strong>
+      This run's coverage failed the gate, so the audit stage did not run and no
+      savings figure is published for it. A number computed over part of the logs
+      is not a smaller number, it is a wrong one — see the coverage panel above,
+      fix the unread sources, and start a new run (SPEC.md §6.1, §11.4).
+    </div>
+    {% else %}
+    <p class="muted">
+      This run stopped before the audit stage. Continue it from a terminal with
+      <span class="mono">llm-cost-auditor audit --run {{ run.run_id }}</span>.
+    </p>
+    {% endif %}
+
+  {% elif findings.analyzed_nothing %}
+  {# "The analyzers looked and found nothing" and "nothing reached an analyzer"
+     produce the same empty list and mean opposite things. Rendering the first
+     when the second happened is a clean bill of health this tool never earned. #}
+  <div class="note bad">
+    <strong>Nothing was analyzed</strong>
+    No record in this run could be analyzed, so nothing on this panel is a
+    statement about the traffic. The exclusions below say why.
+  </div>
+  {% for reason in findings.withheld_reasons %}
+  <div class="note warn mt">{{ reason }}</div>
+  {% endfor %}
+
+  {% elif not findings.findings %}
+  {# An empty finding set is a result, not an absence: the analyzers ran. #}
+  <p class="muted">
+    No waste findings across {{ findings.analyzed_records }} analyzed record(s).
+    Every request was billed for work that was used — no billed failures,
+    truncations, cancelled streams, billed retries, or rate-limit rejections.
+  </p>
+
+  {% else %}
+  <p class="small muted">
+    catalog {{ findings.catalog_version }} · baseline
+    {{ format_usd(findings.baseline_usd_micros) }} over the observed window ·
+    {{ findings.analyzed_records }} record(s) analyzed ·
+    digest <span class="mono">{{ findings.digest()[:12] }}</span>
+  </p>
+
+  <div class="scroll mt">
+    <table>
+      <thead>
+        <tr>
+          <th>Finding</th><th>Workload</th><th>Confidence</th>
+          <th class="num">Marginal</th><th class="num">Standalone</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for finding in findings.findings %}
+        <tr>
+          <td>
+            <span class="mono small">{{ finding.analyzer }}</span><br>
+            <span class="small">{{ finding.title }}</span>
+          </td>
+          <td class="mono small">{{ finding.workloads | join(', ') }}</td>
+          <td class="small">{{ finding.confidence.value }}</td>
+          <td class="num">{{ format_usd(finding.savings.gross_marginal.expected_usd_micros) }}</td>
+          <td class="num">{{ format_usd(finding.savings.gross_standalone.expected_usd_micros) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="3"><strong>Portfolio</strong>
+            <span class="small muted">— the sum of marginals only (§11.2)</span></td>
+          <td class="num"><strong>{{ format_usd(findings.portfolio_usd_micros) }}</strong></td>
+          <td class="num"></td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  {# Per tier, so a heuristic never enters a total silently (§11.3). #}
+  <div class="scroll mt">
+    <table>
+      <thead><tr><th>Confidence tier</th><th class="num">Marginal savings</th></tr></thead>
+      <tbody>
+        {% for tier, amount in findings.by_confidence().items() %}
+        <tr><td class="small">{{ tier.value }}</td><td class="num">{{ format_usd(amount) }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% for finding in findings.findings %}
+  <div class="note mt">
+    <strong>{{ finding.id }}</strong>
+    <p class="small">{{ finding.title }}</p>
+    <p class="small muted">
+      slices: {% for ref in finding.slices %}<span class="mono">{{ ref.label }}</span>{% if not loop.last %}, {% endif %}{% endfor %}
+      · risk {{ finding.risk.value }} · effort {{ finding.effort.value }}
+      · realizable {{ finding.savings.realizable.value }}
+    </p>
+    <p class="small">
+      {{ format_usd(finding.savings.gross_marginal.expected_usd_micros) }} marginal
+      (range {{ format_usd(finding.savings.gross_marginal.low_usd_micros) }} to
+      {{ format_usd(finding.savings.gross_marginal.high_usd_micros) }})
+      {% if finding.evidence.detail.get('marginal_absorbed_by') %}
+      {# A marginal below its standalone with nobody named is the one number
+         here a reader cannot check (§11.2). #}
+      — of {{ format_usd(finding.savings.gross_standalone.expected_usd_micros) }} standalone,
+      {{ format_usd(finding.savings.gross_standalone.expected_usd_micros
+                    - finding.savings.gross_marginal.expected_usd_micros) }}
+      is already credited to
+      {{ finding.evidence.detail['marginal_absorbed_by'] | join(', ') }}
+      {% endif %}
+    </p>
+
+    <p class="small muted">
+      evidence: {{ finding.evidence.requests }} request(s)
+      {%- if finding.evidence.window_days %} over
+      {{ '%.1f' | format(finding.evidence.window_days) }} days{% endif %}
+      · method <span class="mono">{{ finding.evidence.method }}</span>
+    </p>
+    <ul class="small muted">
+      {% for key, value in finding.evidence.detail.items() %}
+      {% if key != 'marginal_absorbed_by' %}
+      <li><span class="mono">{{ key }}</span> = {{ value }}</li>
+      {% endif %}
+      {% endfor %}
+      {% for assumption in finding.evidence.assumptions %}
+      <li>assumes: {{ assumption }}</li>
+      {% endfor %}
+    </ul>
+
+    {% for penalty in finding.confidence_penalties %}
+    <div class="note warn">
+      <strong>{{ penalty.effect }} ({{ penalty.code }})</strong>
+      {{ penalty.detail }}
+    </div>
+    {% endfor %}
+
+    <p class="small"><strong>Remediation.</strong> {{ finding.remediation.summary }}</p>
+    {% for hint in finding.remediation.files_hint %}
+    <p class="small muted">look in: {{ hint }}</p>
+    {% endfor %}
+    <ul class="small muted">
+      {% for step in finding.verification %}<li>verify: {{ step }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+
+  {% for reason in findings.withheld_reasons %}
+  <div class="note warn mt">{{ reason }}</div>
+  {% endfor %}
+
+  <div class="actions mt">
+    <a class="btn" href="/api/runs/{{ run.run_id }}/findings">findings.json</a>
+  </div>
+
+  <p class="small muted mt">
+    Public list prices. No commercial overlay is applied (SPEC.md §7.2), so an
+    account with negotiated terms is priced high here.
+  </p>
+  {% endif %}
+</div>
+</div>

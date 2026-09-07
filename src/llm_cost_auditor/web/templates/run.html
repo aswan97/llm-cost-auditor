@@ -54,12 +54,71 @@
 {% with baseline = none %}{% include "_cost.html" %}{% endwith %}
 {% endif %}
 
+{% if run.profile %}
+<div class="panel">
+  <h3>Workloads</h3>
+  <p class="small muted">
+    {{ run.profile.workloads | length }} discovered by
+    <span class="mono">{{ run.profile.method }}</span>
+  </p>
+  <div class="scroll mt">
+    <table>
+      <thead>
+        <tr><th>Workload</th><th class="num">Records</th><th>Models</th><th>Matched on</th></tr>
+      </thead>
+      <tbody>
+        {% for workload in run.profile.workloads %}
+        <tr>
+          <td class="mono small">{{ workload.id }}</td>
+          <td class="num">{{ workload.records }}</td>
+          <td class="small">{{ workload.models | join(', ') }}</td>
+          <td class="small muted">
+            {%- for name, value in workload.matcher.items() %}
+            {{ name }}={{ value }}{% if not loop.last %}, {% endif %}
+            {%- else %}—{% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if run.profile.unmapped_records %}
+  <div class="note warn mt">
+    <strong>{{ run.profile.unmapped_records }} record(s)
+    ({{ '%.1f' | format(run.profile.unmapped_pct) }}%) are unmapped</strong>
+    They carry none of the grouping labels, so they are one anonymous bucket
+    rather than a workload. The per-workload figures below mean less the larger
+    this share is.
+  </div>
+  {% endif %}
+
+  {# What the grouping cannot see, stated rather than left to be assumed from a
+     table that looks complete (§8.2). #}
+  <ul class="small muted mt">
+    {% for limitation in run.profile.limitations %}<li>{{ limitation }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{# Same two paths as the cost panel: a finished run has a file to read, so the
+   placeholder is accurate and the panel is fetched once; an unfinished one
+   renders inline and polls itself, because a run page opened the moment a run
+   starts must correct itself rather than showing "no findings" forever. #}
+{% if run.status.terminal %}
+<div id="findings" hx-get="/runs/{{ run.run_id }}/findings" hx-trigger="load" hx-swap="outerHTML">
+  <div class="panel muted">Reading findings…</div>
+</div>
+{% else %}
+{% with findings = none %}{% include "_findings.html" %}{% endwith %}
+{% endif %}
+
 <div class="note">
-  <strong>Later stages</strong>
-  <code>profile</code> and <code>audit</code> are not implemented in this build,
-  so this run stops after ingest. The executive section, the findings table, and
-  the workload pages render a finding set that does not exist yet — they are
-  built after the first analyzer produces real output, never against mock data
-  (AGENTS.md, SPEC.md §4).
+  <strong>Later analyzers</strong>
+  Only the waste findings of SPEC.md §9.1 exist in this build. The prefix-cache
+  opportunity, the cache-efficiency critique, and the response-level and
+  near-duplicate cache analyses (§9.2–§9.4) are the next slice, and the
+  executive section and workload pages are built once they produce real output —
+  never against mock data (AGENTS.md, SPEC.md §4).
 </div>
 {% endblock %}

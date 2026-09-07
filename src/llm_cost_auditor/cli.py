@@ -649,14 +649,33 @@ def _print_findings(runs: RunStore, run_id: str, findings_out: Path | None) -> N
         _out(f"Wrote {findings_out}")
 
     _out(f"Findings — run {run_id}")
-    _out(
-        f"catalog {results.catalog_version}, baseline over the observed window "
-        f"{baseline.format_usd(results.baseline_usd_micros)}, digest {results.digest()[:12]}"
-    )
+    if results.analyzed_nothing:
+        # Never "$0.00": an unpriced run and a free one are different facts, and
+        # printing the second is the confident-wrong-number failure itself.
+        _out(f"catalog {results.catalog_version}, nothing priced, digest {results.digest()[:12]}")
+    else:
+        _out(
+            f"catalog {results.catalog_version}, baseline over the observed window "
+            f"{baseline.format_usd(results.baseline_usd_micros)}, "
+            f"digest {results.digest()[:12]}"
+        )
     _out()
 
-    if not results.findings:
-        _out("No waste findings. Every request in this run was billed for work that was used.")
+    if results.analyzed_nothing:
+        # "The analyzers looked and found nothing" and "nothing reached an
+        # analyzer" produce the same empty list and mean opposite things. Saying
+        # the first when the second happened is a clean bill of health this tool
+        # never earned.
+        typer.secho(
+            "No record in this run could be analyzed, so nothing here is a statement about "
+            "the traffic. See the exclusions below.",
+            fg=typer.colors.YELLOW,
+        )
+    elif not results.findings:
+        _out(
+            f"No waste findings across {results.analyzed_records} analyzed record(s). "
+            f"Every request was billed for work that was used."
+        )
     else:
         _out(f"  {'#':>2}  {'finding':<44}{'tier':<11}{'marginal':>13}{'standalone':>13}")
         for index, finding in enumerate(results.findings, start=1):
@@ -671,7 +690,7 @@ def _print_findings(runs: RunStore, run_id: str, findings_out: Path | None) -> N
         )
         _out()
         _out("By confidence tier (§11.3)")
-        for tier, amount in sorted(results.by_confidence().items(), key=lambda kv: kv[0].rank):
+        for tier, amount in results.by_confidence().items():
             _out(f"  {tier.value:<12}{baseline.format_usd(amount):>13}")
 
     for index, finding in enumerate(results.findings, start=1):

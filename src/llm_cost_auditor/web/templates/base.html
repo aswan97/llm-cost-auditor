@@ -23,12 +23,12 @@
      look more certain than they are (SPEC.md §15.6); the honest version of
      that here is to say plainly that no number has been produced yet. #}
   <div class="note">
-    <strong>Pricing-stage build</strong>
-    This build implements ingest and pricing — connectors, decoding, the
-    Anthropic adapter, retry classification, the run store, coverage, and
-    baseline spend at public list prices. There are no analyzers yet, so no
-    page here shows a finding, a saving, or a recommendation; a run page shows
-    what its traffic cost and nothing about what it could have cost.
+    <strong>Waste-stage build</strong>
+    This build implements ingest, pricing, workload discovery, and the waste
+    findings of SPEC.md §9.1 — billed retries, billed failures, truncations,
+    cancelled streams, and rate-limit churn. There are no cache, batching, or
+    routing analyzers yet, so no page here shows a caching, batching, or
+    routing recommendation, and no run shows a monthly projection.
     Every figure is computed from the run record on disk and the price catalog.
   </div>
   {% block body %}{% endblock %}
