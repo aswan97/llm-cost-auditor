@@ -10,6 +10,67 @@ the merge if it is unchanged or undocumented here.
 ## [Unreleased]
 
 ### Added
+- **The first analyzer: waste findings** (SPEC.md §9.1). Five detectors, all of them Tier C
+  so they work on a raw billing export with no instrumentation: billed retry attempts a
+  later attempt superseded, `error_billed` records charged for output nobody received,
+  `max_tokens` truncations billed in full, cancelled streams billed for tokens nobody read,
+  and rate-limit churn. Every figure is a sum of amounts the provider already charged, so a
+  reader can check it against their own invoice.
+
+  **The findings overlap on purpose**, which is what §11.2 exists for: a 5xx-after-generation
+  attempt is both a billed failure *and* a superseded retry. Each finding reports what it
+  would save alone and what it adds given everything ranked above it, and only the marginals
+  are ever totalled. `attribution.py` is the whole of that mechanism — integer claims over
+  record ids — with the property that marginals sum **exactly** to the cost of the union of
+  claimed records. The fixture pins the gap: on ten records, naive summation would have
+  overstated the total by 5,000 μUSD out of 35,500.
+
+  A marginal that shrank now names who took the difference. `$0.00` next to a real standalone
+  reads as "not worth doing" when it means "already counted under the finding above", and
+  that was the one number in the report a reader could not check.
+
+  Deliberately **not** built, and stated in the analyzer rather than stubbed: oversized
+  `max_tokens` (a distribution question whose threshold has no evidence behind it yet, and
+  `$0` on both modelled providers), duplicate in-flight requests (needs Tier B fingerprints
+  and the request-overlap model §9.2's cache simulator will build), and redundant context
+  (Tier A). A stub returning nothing is indistinguishable in a report from an analyzer that
+  looked and found nothing.
+
+- **The profile and audit stages, so a run reaches an analyzer.** `run` now executes
+  `ingest → profile → audit` (§5.3), `--stop-after` halts it, and `profile --run` /
+  `audit --run` continue the same run. `runs findings` prints the report; `--json` exports
+  `findings.json`.
+
+  Profiling implements **§8.2 step 2 only** — grouping by the labels the logs already carry —
+  and says so on its own result rather than leaving a reader to assume the full hierarchy.
+  No architecture map, no template fingerprinting (Tier B), and no profile axes: the axes
+  gate routing, batching, and cache findings, none of which exist yet, so an axis built now
+  would be a gate with nothing behind it. Waste findings are ungated by design — a billed
+  failure is waste at any blast radius. Traffic carrying no grouping labels lands in
+  `unmapped`, which is reported with its share, because a run that is 70% one anonymous
+  bucket is one whose per-workload figures mean very little.
+
+- **The finding schema** (§13.4) as a pydantic contract: integer μUSD throughout, ranges that
+  refuse to be inverted, a `$0` realizable that must name what suppressed it, and a `slices`
+  list that cannot be empty — a finding that cannot say which traffic it covers can be read
+  as covering traffic it never saw. Plus the analyzer × slice verdict matrix (§5.2) and a
+  SHA-256 content digest over the document (§13.6), which is a digest and not a signature.
+
+- **Findings and workloads in the web app** (§13.1). The run page gains a workloads panel and
+  a findings panel — the ranked table, per-tier totals, and each finding's evidence,
+  confidence penalties, remediation, and verification steps — plus `GET
+  /api/runs/{id}/findings`. The panel formats integers the engine wrote and recomputes
+  nothing, so a test asserts the screen and `findings.json` agree figure by figure. There is
+  no write counterpart: findings are engine output.
+
+  A run whose coverage failed the §6.1 gate says **savings withheld** rather than "no
+  findings" — a wrong number and an absent one must not read the same.
+
+- **Hand-computed waste fixtures** in `tests/fixtures/waste/`, with their own test catalog at
+  round rates and a README deriving every expected value line by line — the baseline, each
+  finding's six money figures, the portfolio total computed two independent ways, and the
+  per-tier split. Asserted exactly.
+
 - **Ingest, end to end, for local files and Anthropic logs.** The first working slice of
   the engine (SPEC.md §6): the local-files connector with window pruning and source-scope
   confinement; a shared decode layer detecting compression (gzip/bzip2/zstd) and container
@@ -40,9 +101,10 @@ the merge if it is unchanged or undocumented here.
   object/byte estimate, and Run detail with live progress, the coverage panel, the slice
   table, and the manifest. Server-rendered Jinja + HTMX with every asset served from the
   package, CSRF protection on state-changing routes, a CSP that forbids external origins,
-  and a read-only `/api/sources` with no write counterpart. It renders **only what ingest
-  produces** — no findings pages and no dollar figures, because no analyzer exists yet and
-  mock data in a template is the failure this project is trying to prevent.
+  and a read-only `/api/sources` with no write counterpart. It renders **only what the
+  engine produces** — no mock data in a template, ever, which is the failure this project
+  is trying to prevent. (The findings and workload panels arrived with the waste analyzer
+  above, once there was real output to render.)
 
 - **Privacy protections at ingest** (§12): prompt text is hashed at segment boundaries and
   discarded, label values are redacted before storage, and tests assert the *absence* of
@@ -129,6 +191,27 @@ the merge if it is unchanged or undocumented here.
   `docker compose run --rm test`, `... run --rm cli <args>`, `... up app`.
 
 ### Fixed
+- **A run where nothing could be priced reported a clean bill of health.** Every record
+  excluded for having no catalog rate leaves an empty finding list — identical to a run
+  whose traffic was genuinely clean — and both surfaces said "no waste findings, every
+  request was billed for work that was used". That is the confident, plausible, wrong
+  statement this tool exists to prevent, and it was found by reading the output rather than
+  by a test. `FindingSet` now carries `analyzed_records`, and a run that analyzed nothing
+  says so instead; its header reads "nothing priced" rather than `$0.00`, because an
+  unpriced run and a free one are different facts.
+
+- **A real amount below a cent rendered as `$0.00`.** Two decimals is the right precision for
+  a bill and the wrong one for a single finding over a short window, and a row that reads as
+  exactly nothing gets skipped. `format_usd` now renders `<$0.01` for money that was actually
+  spent, and `$0.00` only for zero.
+
+- **`audit --run` on a gated run sent the user to the wrong fix.** The stage-ordering check
+  fired first, so the error said "profile has not completed" — the user ran `profile`, it
+  succeeded, and only then did they learn the audit was never going to happen. The coverage
+  gate is now checked before the stage is started. Relatedly, a stage refused for either
+  reason is reported without marking the run failed: the run is untouched, and it is the
+  request that was refused.
+
 - **Every form button in the web app was refused as cross-origin.** The app sent
   `Referrer-Policy: no-referrer`, and per the Fetch standard a browser serializes the
   `Origin` header as `null` on a non-CORS non-GET request under that policy — which is

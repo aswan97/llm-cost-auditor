@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import WINDOW
 from typer.testing import CliRunner
 
 from llm_cost_auditor import config as config_module
@@ -178,14 +179,146 @@ def test_ingest_rejects_a_malformed_window(workspace: Path) -> None:
     assert "START..END" in result.stderr
 
 
-def test_run_command_refuses_stages_that_do_not_exist(workspace: Path) -> None:
-    """A command that pretends to analyze would be worse than one that refuses."""
-    result = run("run", "local-anthropic", workspace=workspace)
-    assert result.exit_code == 1
-    assert "only the ingest stage exists" in result.stderr
+def test_run_executes_every_stage_and_prints_a_report(workspace: Path) -> None:
+    """The whole pipeline, exactly as §13.3 describes it: ingest, profile, audit."""
+    result = run("run", "local-anthropic", "--window", WINDOW, workspace=workspace)
+    assert result.exit_code == 0
+    assert "Stages     : ingest, profile, audit" in result.stdout
+    assert "Workloads  (declared_labels" in result.stdout
+    assert "portfolio (sum of marginals only" in result.stdout
+    assert "By confidence tier" in result.stdout
 
-    explicit = run("run", "local-anthropic", "--stop-after", "ingest", workspace=workspace)
-    assert explicit.exit_code == 0
+
+def test_stop_after_halts_and_the_named_stage_resumes_the_same_run(workspace: Path) -> None:
+    """`--run <id>` is how stages compose, and there is no implicit "most recent"."""
+    started = run(
+        "run", "local-anthropic", "--window", WINDOW, "--stop-after", "ingest", workspace=workspace
+    )
+    assert started.exit_code == 0
+    run_id = started.stdout.splitlines()[0].removeprefix("Run ").strip()
+    assert "Workloads" not in started.stdout
+
+    profiled = run("profile", "--run", run_id, workspace=workspace)
+    assert profiled.exit_code == 0
+    assert "Workloads  (declared_labels" in profiled.stdout
+
+    audited = run("audit", "--run", run_id, workspace=workspace)
+    assert audited.exit_code == 0
+    assert f"Findings — run {run_id}" in audited.stdout
+
+
+def test_a_stage_refuses_to_run_out_of_order(workspace: Path) -> None:
+    """Re-running or skipping a stage means a new run, never in-place mutation (§5.3)."""
+    started = run(
+        "run", "local-anthropic", "--window", WINDOW, "--stop-after", "ingest", workspace=workspace
+    )
+    run_id = started.stdout.splitlines()[0].removeprefix("Run ").strip()
+
+    skipped = run("audit", "--run", run_id, workspace=workspace)
+    assert skipped.exit_code == 1
+    assert "profile has not completed" in skipped.stderr
+
+    run("profile", "--run", run_id, workspace=workspace)
+    twice = run("profile", "--run", run_id, workspace=workspace)
+    assert twice.exit_code == 1
+    assert "already completed the profile stage" in twice.stderr
+
+
+def test_audit_writes_findings_json_where_a_pipeline_wants_it(
+    workspace: Path, tmp_path: Path
+) -> None:
+    run("run", "local-anthropic", "--window", WINDOW, workspace=workspace)
+    run_id = run("runs", "list", workspace=workspace).stdout.splitlines()[1].split()[0]
+
+    out = tmp_path / "findings.json"
+    exported = run("runs", "findings", run_id, "--json", workspace=workspace)
+    assert exported.exit_code == 0
+    payload = json.loads(exported.stdout)
+    assert payload["run_id"] == run_id
+    assert payload["findings"]
+
+    # Every monetary field on the wire is an integer count of micro-USD (§6.4):
+    # a JSON number with a decimal point comes back a float and defeats the
+    # exact-equality the fixtures depend on.
+    savings = payload["findings"][0]["savings"]
+    for band in ("gross_standalone", "gross_marginal", "realizable_range"):
+        for key, value in savings[band].items():
+            assert key.endswith("_usd_micros")
+            assert isinstance(value, int)
+    assert not out.exists()
+
+
+def test_incomplete_coverage_stops_the_pipeline_before_any_savings_figure(
+    workspace: Path, logs: Path
+) -> None:
+    """§11.4: past `max_missing_pct`, savings are withheld *entirely*.
+
+    Every finding this analyzer produces is a savings figure, so there is
+    nothing left to publish but a number that would be wrong — and a footnote
+    does not improve a wrong number. The run keeps its manifest and coverage
+    and simply stops.
+    """
+    (logs / "broken.jsonl.gz").write_bytes(b"\x1f\x8b\x08\x00" + b"garbage" * 200)
+    result = run("run", "local-anthropic", workspace=workspace)
+
+    assert result.exit_code == 2
+    assert "withheld entirely" in result.stdout
+    assert "Stages     : ingest" in result.stdout
+    assert "portfolio" not in result.stdout
+
+    run_id = result.stdout.splitlines()[0].removeprefix("Run ").strip()
+    refused = run("audit", "--run", run_id, workspace=workspace)
+    assert refused.exit_code == 1
+    assert "withheld" in refused.stderr
+
+
+def test_a_dataset_with_no_labels_at_all_still_produces_findings(
+    tmp_path: Path, logs: Path
+) -> None:
+    """The common real first run: billing-only logs, no config, no labels.
+
+    It must produce something useful rather than an empty report or a stack
+    trace — and it must say that its one workload is unmapped rather than
+    presenting `unmapped` as if it were a discovered name.
+    """
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "traffic.jsonl").write_text(
+        '{"request_id":"a","timestamp":"2026-08-01T09:00:00Z","model":"claude-sonnet-4-5",'
+        '"http_status":500,"error":{"type":"api_error"},'
+        '"usage":{"input_tokens":1000,"output_tokens":200}}\n',
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "bare-ws"
+    run("sources", "add", str(bare), workspace=workspace)
+    run(
+        "connections",
+        "add",
+        "bare",
+        "--uri",
+        str(bare),
+        "--source",
+        "anthropic",
+        workspace=workspace,
+    )
+
+    result = run("run", "bare", workspace=workspace)
+    assert result.exit_code == 0
+    assert "unmapped" in result.stdout
+    assert "waste.billed_failure.unmapped" in result.stdout
+    assert "carry none of the grouping labels" in result.stdout
+
+
+def test_findings_before_an_audit_says_so_rather_than_printing_nothing(
+    workspace: Path,
+) -> None:
+    started = run(
+        "run", "local-anthropic", "--window", WINDOW, "--stop-after", "ingest", workspace=workspace
+    )
+    run_id = started.stdout.splitlines()[0].removeprefix("Run ").strip()
+    result = run("runs", "findings", run_id, workspace=workspace)
+    assert result.exit_code == 1
+    assert "has no findings.json" in result.stderr
 
 
 # --- runs -----------------------------------------------------------------------
@@ -283,3 +416,43 @@ def test_an_unknown_timezone_is_a_config_error(workspace: Path) -> None:
         workspace=workspace,
     )
     assert result.exit_code == 1
+
+
+def test_an_unpriceable_run_never_reads_as_a_clean_bill_of_health(
+    tmp_path: Path, logs: Path
+) -> None:
+    """A model the catalog has never heard of excludes every record (§7.1).
+
+    The empty finding list that produces looks exactly like a run whose traffic
+    was clean, and saying so would be the confident-plausible-wrong-number
+    failure this whole tool exists to prevent — asserted on the words a user
+    actually reads, because that is where it went wrong.
+    """
+    unknown = tmp_path / "unknown-model"
+    unknown.mkdir()
+    (unknown / "traffic.jsonl").write_text(
+        '{"request_id":"a","timestamp":"2026-08-01T09:00:00Z","model":"no-such-model",'
+        '"http_status":500,"error":{"type":"api_error"},'
+        '"usage":{"input_tokens":1000,"output_tokens":200}}\n',
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "unknown-ws"
+    run("sources", "add", str(unknown), workspace=workspace)
+    run(
+        "connections",
+        "add",
+        "u",
+        "--uri",
+        str(unknown),
+        "--source",
+        "anthropic",
+        workspace=workspace,
+    )
+
+    result = run("run", "u", workspace=workspace)
+    assert result.exit_code == 0
+    assert "No record in this run could be analyzed" in result.stdout
+    assert "billed for work that was used" not in result.stdout
+    # An unpriced run and a free one are different facts.
+    assert "nothing priced" in result.stdout
+    assert "no catalog rate" in result.stdout

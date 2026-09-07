@@ -33,8 +33,17 @@ def format_usd(micros: int) -> str:
 
     The one place μUSD becomes a string, shared by both surfaces so neither can
     round differently from the other. Never parsed back (AGENTS.md).
+
+    An amount that is real but smaller than a cent renders `<$0.01` rather than
+    `$0.00`. Two decimal places is the right precision for a bill and the wrong
+    one for a single finding on a short window, and a figure that reads as
+    exactly nothing when it is not is the same class of quiet wrongness this
+    tool exists to catch — a reader skips the row instead of noticing the unit.
     """
-    return f"${micros / MICROS_PER_USD:,.2f}"
+    rendered = f"${micros / MICROS_PER_USD:,.2f}"
+    if micros and rendered in ("$0.00", "$-0.00"):
+        return "<$0.01" if micros > 0 else ">-$0.01"
+    return rendered
 
 
 class ModelSpend(BaseModel):

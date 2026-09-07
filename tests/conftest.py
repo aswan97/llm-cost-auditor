@@ -23,11 +23,45 @@ FIXTURES = Path(__file__).parent / "fixtures"
 TRAFFIC = FIXTURES / "anthropic" / "traffic.jsonl"
 WINDOW = "2026-08-01..2026-08-31"
 
+WASTE_TRAFFIC = FIXTURES / "waste" / "traffic.jsonl"
+WASTE_CATALOG = FIXTURES / "waste" / "catalog.yaml"
+
 
 @pytest.fixture
 def expected() -> dict[str, Any]:
     """The hand-computed totals, derived line by line in the fixture README."""
     return json.loads((FIXTURES / "anthropic" / "expected.json").read_text())
+
+
+@pytest.fixture
+def waste_expected() -> dict[str, Any]:
+    """The hand-computed waste figures, derived in `fixtures/waste/README.md`."""
+    return json.loads((FIXTURES / "waste" / "expected.json").read_text())
+
+
+@pytest.fixture
+def waste_workspace(tmp_path: Path) -> Path:
+    """A workspace over the waste fixture traffic.
+
+    Separate from `workspace` because it declares its own model and its own
+    catalog: the expected values are exact, and they must not move when a real
+    price does (AGENTS.md).
+    """
+    directory = tmp_path / "waste-logs"
+    directory.mkdir()
+    shutil.copy(WASTE_TRAFFIC, directory / "traffic.jsonl")
+
+    root = tmp_path / "waste-workspace"
+    root.mkdir()
+    config_module.save(
+        root,
+        WorkspaceConfig(
+            timezone="UTC",
+            sources=[str(directory)],
+            connections=[Connection(id="waste", uri=str(directory), source="anthropic")],
+        ),
+    )
+    return root
 
 
 @pytest.fixture

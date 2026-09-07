@@ -31,13 +31,16 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .errors import RunStateError
+from .findings import FindingSet
 from .ingest.manifest import Coverage, ObjectEntry, SliceSummary
+from .profile import ProfileSummary
 
 RUNS_DIRNAME = "runs"
 
 RUN_JSON = "run.json"
 MANIFEST_JSON = "manifest.json"
 RECORDS_PARQUET = "records.parquet"
+FINDINGS_JSON = "findings.json"
 LOG_JSONL = "log.jsonl"
 
 # A run that has begun is never resumed (§5.4). A heartbeat older than this on
@@ -113,6 +116,12 @@ class RunRecord(BaseModel):
     record_count: int = 0
     coverage: Coverage | None = None
     slices: list[SliceSummary] = Field(default_factory=list)
+
+    # The profile stage's output (§8.2). Lives here rather than in its own
+    # artifact because it is small, and because everything the app reads about
+    # a run's shape already comes from `run.json`.
+    profile: ProfileSummary | None = None
+    finding_count: int = 0
 
     records_purged: bool = False
     error: str | None = None
@@ -324,6 +333,22 @@ class RunStore:
             return []
         raw = json.loads(path.read_text(encoding="utf-8"))
         return [ObjectEntry.model_validate(item) for item in raw]
+
+    def write_findings(self, run_id: str, results: FindingSet) -> None:
+        """Write `findings.json` — the finding set for this run (§5.3, §13.4)."""
+        self.write_artifact(run_id, FINDINGS_JSON, results.model_dump_json(indent=2))
+
+    def read_findings(self, run_id: str) -> FindingSet | None:
+        """The run's findings, or `None` when the audit stage has not run.
+
+        `None` and "no findings" are different answers and are kept different:
+        an empty `FindingSet` means the analyzers looked and found nothing,
+        which is a result worth showing.
+        """
+        path = self.artifact_path(run_id, FINDINGS_JSON)
+        if not path.exists():
+            return None
+        return FindingSet.model_validate_json(path.read_text(encoding="utf-8"))
 
     def append_event(self, run_id: str, event: str, payload: dict[str, Any]) -> None:
         """Append one structured progress event to `log.jsonl`.

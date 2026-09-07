@@ -24,6 +24,7 @@ import typer
 
 from . import baseline, engine
 from . import config as config_module
+from . import profile as profile_module
 from . import window as window_module
 from .config import DEFAULT_WORKSPACE, Connection, WorkspaceConfig, check_in_scope
 from .errors import AuditorError
@@ -373,14 +374,72 @@ def run_command(
     ] = None,
     workspace: WorkspaceOption = DEFAULT_WORKSPACE,
 ) -> None:
-    """Run the pipeline over one or more connections."""
-    if stop_after is not Stage.INGEST:
-        _fail(
-            "only the ingest stage exists in this build. Use `--stop-after ingest` (or the "
-            "`ingest` command). The profile and audit stages, and the analyzers they feed, "
-            "are the next slice (SPEC.md §4)."
-        )
-    _start_run(connection_ids, audit_window, timezone, workspace, Stage.INGEST)
+    """Run the whole pipeline over one or more connections: ingest, profile, audit."""
+    if stop_after is Stage.AUDIT:
+        _fail("--stop-after audit is the default. Drop the option to run every stage.")
+    _start_run(connection_ids, audit_window, timezone, workspace, stop_after)
+
+
+@app.command("profile")
+def profile_command(
+    run_id: Annotated[str, typer.Option("--run", help="The run to profile.")],
+    workspace: WorkspaceOption = DEFAULT_WORKSPACE,
+) -> None:
+    """Discover workloads in a run that has completed ingest (SPEC.md §8.2)."""
+    runs = RunStore(workspace)
+    record = _resume(workspace, runs, run_id, engine.execute_profile)
+    _print_profile(record)
+
+
+@app.command("audit")
+def audit_command(
+    run_id: Annotated[str, typer.Option("--run", help="The run to analyze.")],
+    findings_out: Annotated[
+        Path | None,
+        typer.Option("--json", help="Also copy findings.json here, for pipelines."),
+    ] = None,
+    workspace: WorkspaceOption = DEFAULT_WORKSPACE,
+) -> None:
+    """Run the analyzers over a run that has completed profile (SPEC.md §9)."""
+    runs = RunStore(workspace)
+    _resume(workspace, runs, run_id, engine.execute_audit)
+    _print_findings(runs, run_id, findings_out)
+
+
+def _resume(
+    workspace: Path,
+    runs: RunStore,
+    run_id: str,
+    execute: Any,
+) -> Any:
+    """Run one stage against an existing run and render the events it appended.
+
+    A stage refused because it has already run, or because an earlier one has
+    not, is a problem with the *request* rather than with the run: the run is
+    untouched and stays exactly as it was, so the error is reported here and
+    nothing is marked failed (§5.3).
+    """
+    if not runs.exists(run_id):
+        _fail(f"no run {run_id!r} in {runs.root}")
+    before = len(list(runs.read_events(run_id)))
+    try:
+        record = execute(workspace=workspace, runs=runs, run_id=run_id)
+    except AuditorError as exc:
+        _fail(str(exc))
+        raise
+    _echo_events(runs, run_id, offset=before)
+    if record.status in (RunStatus.FAILED, RunStatus.CANCELLED):
+        _out()
+        _print_run(record, runs)
+        raise typer.Exit(code=1)
+    return record
+
+
+def _echo_events(runs: RunStore, run_id: str, *, offset: int) -> None:
+    for event in runs.read_events(run_id, offset=offset):
+        message = event.get("message", "")
+        colour = typer.colors.RED if event["event"] == "error" else None
+        typer.secho(f"  [{event['event']}] {message}", fg=colour)
 
 
 def _start_run(
@@ -388,7 +447,7 @@ def _start_run(
     audit_window: str | None,
     timezone: str | None,
     workspace: Path,
-    stop_after: Stage,
+    stop_after: Stage | None,
 ) -> None:
     settings = config_module.load(workspace)
     zone = timezone or settings.timezone
@@ -412,15 +471,18 @@ def _start_run(
     )
     _out(f"Run {record.run_id}")
 
-    seen = 0
-    result = engine.execute_ingest(workspace=workspace, runs=runs, run_id=record.run_id)
-    for event in runs.read_events(record.run_id, offset=seen):
-        message = event.get("message", "")
-        colour = typer.colors.RED if event["event"] == "error" else None
-        typer.secho(f"  [{event['event']}] {message}", fg=colour)
+    result = engine.execute_run(workspace=workspace, runs=runs, run_id=record.run_id)
+    _echo_events(runs, record.run_id, offset=0)
 
     _out()
     _print_run(result, runs)
+    if result.profile is not None:
+        _out()
+        _print_profile(result)
+    if Stage.AUDIT in result.stages_completed:
+        _out()
+        _print_findings(runs, result.run_id, None)
+
     if result.status in (RunStatus.FAILED, RunStatus.CANCELLED):
         raise typer.Exit(code=1)
     if result.status is RunStatus.INCOMPLETE:
@@ -511,6 +573,7 @@ def _print_run(record: Any, runs: RunStore) -> None:
     _out(f"Window     : {record.request.window or 'all available'} ({record.request.timezone})")
     _out(f"Observed   : {record.observed_start} .. {record.observed_end} (UTC)")
     _out(f"Records    : {record.record_count}")
+    _out(f"Findings   : {record.finding_count}")
     if record.error:
         typer.secho(f"Error      : {record.error}", fg=typer.colors.RED)
 
@@ -551,6 +614,152 @@ def _print_run(record: Any, runs: RunStore) -> None:
                 f"  {item.connection_id} / {item.source} / tier {item.fidelity.value} "
                 f"— {item.records} records, mix {item.fidelity_counts}"
             )
+
+
+def _print_profile(record: Any) -> None:
+    """The discovered workloads, and what the grouping could not see (§8.2)."""
+    summary = record.profile
+    if summary is None:
+        _out("No profile yet. Run `profile --run <id>`.")
+        return
+
+    _out(f"Workloads  ({summary.method}, {len(summary.workloads)} discovered)")
+    _out(f"  {'workload':<40}{'records':>9}  models")
+    for workload in summary.workloads:
+        _out(f"  {workload.id[:39]:<40}{workload.records:>9}  {', '.join(workload.models)}")
+    if summary.unmapped_records:
+        typer.secho(
+            f"  ~ {summary.unmapped_records} record(s) ({summary.unmapped_pct:.1f}%) carry none "
+            f"of the grouping labels and are grouped as '{profile_module.UNMAPPED}'.",
+            fg=typer.colors.YELLOW,
+        )
+    for limitation in summary.limitations:
+        _out(f"  . {limitation}")
+
+
+def _print_findings(runs: RunStore, run_id: str, findings_out: Path | None) -> None:
+    """Render `findings.json` as a report a human can act on and check by hand."""
+    results = runs.read_findings(run_id)
+    if results is None:
+        _fail(f"run {run_id} has no findings.json. Run `audit --run {run_id}` first.")
+        return
+
+    if findings_out is not None:
+        findings_out.write_text(results.model_dump_json(indent=2), encoding="utf-8")
+        _out(f"Wrote {findings_out}")
+
+    _out(f"Findings — run {run_id}")
+    if results.analyzed_nothing:
+        # Never "$0.00": an unpriced run and a free one are different facts, and
+        # printing the second is the confident-wrong-number failure itself.
+        _out(f"catalog {results.catalog_version}, nothing priced, digest {results.digest()[:12]}")
+    else:
+        _out(
+            f"catalog {results.catalog_version}, baseline over the observed window "
+            f"{baseline.format_usd(results.baseline_usd_micros)}, "
+            f"digest {results.digest()[:12]}"
+        )
+    _out()
+
+    if results.analyzed_nothing:
+        # "The analyzers looked and found nothing" and "nothing reached an
+        # analyzer" produce the same empty list and mean opposite things. Saying
+        # the first when the second happened is a clean bill of health this tool
+        # never earned.
+        typer.secho(
+            "No record in this run could be analyzed, so nothing here is a statement about "
+            "the traffic. See the exclusions below.",
+            fg=typer.colors.YELLOW,
+        )
+    elif not results.findings:
+        _out(
+            f"No waste findings across {results.analyzed_records} analyzed record(s). "
+            f"Every request was billed for work that was used."
+        )
+    else:
+        _out(f"  {'#':>2}  {'finding':<44}{'tier':<11}{'marginal':>13}{'standalone':>13}")
+        for index, finding in enumerate(results.findings, start=1):
+            _out(
+                f"  {index:>2}  {finding.id[:43]:<44}{finding.confidence.value:<11}"
+                f"{baseline.format_usd(finding.savings.gross_marginal.expected_usd_micros):>13}"
+                f"{baseline.format_usd(finding.savings.gross_standalone.expected_usd_micros):>13}"
+            )
+        _out(
+            f"  {'':>2}  {'portfolio (sum of marginals only, §11.2)':<44}{'':<11}"
+            f"{baseline.format_usd(results.portfolio_usd_micros):>13}"
+        )
+        _out()
+        _out("By confidence tier (§11.3)")
+        for tier, amount in results.by_confidence().items():
+            _out(f"  {tier.value:<12}{baseline.format_usd(amount):>13}")
+
+    for index, finding in enumerate(results.findings, start=1):
+        _out()
+        _out(f"[{index}] {finding.id} — {finding.confidence.value}")
+        _out(f"     {finding.title}")
+        _out(f"     slices     : {', '.join(ref.label for ref in finding.slices)}")
+        marginal = finding.savings.gross_marginal
+        _out(
+            f"     marginal   : {baseline.format_usd(marginal.expected_usd_micros)} "
+            f"(range {baseline.format_usd(marginal.low_usd_micros)}"
+            f" to {baseline.format_usd(marginal.high_usd_micros)}, "
+            f"realizable {finding.savings.realizable.value})"
+        )
+        standalone = finding.savings.gross_standalone
+        absorbed = finding.evidence.detail.get("marginal_absorbed_by")
+        if absorbed:
+            # §11.2: both numbers, always, and never a silent gap between them.
+            overlap = standalone.expected_usd_micros - marginal.expected_usd_micros
+            _out(
+                f"     attributed : {baseline.format_usd(standalone.expected_usd_micros)} "
+                f"standalone, of which {baseline.format_usd(overlap)} is already "
+                f"credited to {', '.join(absorbed)}"
+            )
+        evidence = finding.evidence
+        span = f" over {evidence.window_days:.1f} days" if evidence.window_days else ""
+        _out(f"     evidence   : {evidence.requests} request(s){span}, method={evidence.method}")
+        for key, value in evidence.detail.items():
+            if key == "marginal_absorbed_by":
+                continue
+            _out(f"                  {key} = {value}")
+        for assumption in evidence.assumptions:
+            _out(f"                  assumes: {assumption}")
+        for penalty in finding.confidence_penalties:
+            typer.secho(
+                f"     confidence : {penalty.effect} ({penalty.code}) — {penalty.detail}",
+                fg=typer.colors.YELLOW,
+            )
+        _out(f"     risk/effort: {finding.risk.value} / {finding.effort.value}")
+        _out(f"     remediation: {finding.remediation.summary}")
+        for hint in finding.remediation.files_hint:
+            _out(f"                  look in: {hint}")
+        for step in finding.verification:
+            _out(f"     verify     : {step}")
+
+    _out()
+    for reason in results.withheld_reasons:
+        typer.secho(f"~ {reason}", fg=typer.colors.YELLOW)
+    _out()
+    _out("Public list prices. No commercial overlay is applied (SPEC.md §7.2), so an")
+    _out("account with negotiated terms is priced high here.")
+
+
+@runs_app.command("findings")
+def runs_findings(
+    run_id: Annotated[str, typer.Argument()],
+    as_json: Annotated[bool, typer.Option("--json", help="Print findings.json verbatim.")] = False,
+    workspace: WorkspaceOption = DEFAULT_WORKSPACE,
+) -> None:
+    """The findings a completed audit produced (SPEC.md §13.4)."""
+    runs = RunStore(workspace)
+    if as_json:
+        results = runs.read_findings(run_id)
+        if results is None:
+            _fail(f"run {run_id} has no findings.json. Run `audit --run {run_id}` first.")
+            return
+        _out(results.model_dump_json(indent=2))
+        return
+    _print_findings(runs, run_id, None)
 
 
 # --- serve --------------------------------------------------------------------

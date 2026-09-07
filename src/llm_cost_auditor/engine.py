@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from . import config as config_module
+from . import profile as profile_module
+from . import waste
 from . import window as window_module
 from .errors import AuditorError, RunCancelled
 from .ingest import pipeline
@@ -128,6 +130,224 @@ def execute_ingest(
         return runs.set_status(run_id, RunStatus.FAILED, error=f"{type(exc).__name__}: {exc}")
 
 
+def execute_profile(
+    *,
+    workspace: Path,
+    runs: RunStore,
+    run_id: str,
+    should_cancel: Callable[[], bool] | None = None,
+) -> RunRecord:
+    """Discover workloads over an ingested run's records (SPEC.md §8.2).
+
+    Read-only over `records.parquet`: the stage produces a grouping, never a
+    changed record. What it can and cannot see is stated on the result rather
+    than assumed — see `profile.ProfileSummary.limitations`.
+    """
+    del workspace  # the stage needs nothing outside the run directory
+
+    def body(record: RunRecord, emit: _Emit) -> RunRecord:
+        store = _records_of(runs, run_id)
+        emit("stage", {"stage": "profile", "pct": 0, "message": "discovering workloads"})
+
+        summary = profile_module.discover(store.iter_records())
+        record = runs.get(run_id)
+        record.profile = summary
+        runs.save(record)
+
+        emit(
+            "stage",
+            {
+                "stage": "profile",
+                "pct": 100,
+                "message": (
+                    f"{len(summary.workloads)} workload(s) over {summary.total_records} "
+                    f"record(s); {summary.unmapped_pct:.1f}% unmapped"
+                ),
+                "counts": {"workloads": len(summary.workloads)},
+            },
+        )
+        return record
+
+    return _stage(runs, run_id, Stage.PROFILE, body, should_cancel)
+
+
+def execute_audit(
+    *,
+    workspace: Path,
+    runs: RunStore,
+    run_id: str,
+    should_cancel: Callable[[], bool] | None = None,
+) -> RunRecord:
+    """Run the analyzers and write `findings.json` (SPEC.md §9, §13.4).
+
+    Refuses to run at all when coverage failed the §6.1 gate. Savings figures
+    are withheld entirely for such a run (§11.4), and every finding an analyzer
+    produces *is* a savings figure — so there is nothing to emit but a number
+    that would be wrong, and a footnote does not improve a wrong number.
+
+    That check runs *before* the stage is even started, ahead of the ordering
+    check. Both refuse the same request, but only one of them tells the user
+    something they can act on: "profile has not completed" sends them to run
+    `profile`, which succeeds, and only then do they learn the audit was never
+    going to happen.
+    """
+    del workspace
+
+    record = runs.get(run_id)
+    if record.coverage is not None and record.coverage.incomplete:
+        raise AuditorError(
+            "this run's coverage failed the §6.1 gate, so savings figures are withheld "
+            "entirely (§11.4) and the audit stage will not run. Fix the unread sources "
+            "and start a new run: " + " ".join(record.coverage.gating_reasons)
+        )
+
+    def body(record: RunRecord, emit: _Emit) -> RunRecord:
+        if record.profile is None:
+            raise AuditorError(
+                f"run {run_id} has no profile. The audit stage analyzes discovered workloads, "
+                f"so the profile stage must complete first (§5.3)."
+            )
+
+        store = _records_of(runs, run_id)
+        emit("stage", {"stage": "audit", "pct": 0, "message": "running waste analyzers"})
+
+        results = waste.analyze(
+            run_id=run_id,
+            records=store.iter_records(),
+            summary=record.profile,
+            slices=record.slices,
+            coverage=record.coverage,
+        )
+        runs.write_findings(run_id, results)
+
+        record = runs.get(run_id)
+        record.finding_count = len(results.findings)
+        runs.save(record)
+
+        for reason in results.withheld_reasons:
+            emit("coverage", {"message": reason})
+        emit(
+            "stage",
+            {
+                "stage": "audit",
+                "pct": 100,
+                "message": (
+                    f"{len(results.findings)} finding(s), "
+                    f"{results.portfolio_usd_micros} uUSD marginal over the observed window"
+                ),
+                "counts": {"findings": len(results.findings)},
+            },
+        )
+        return record
+
+    return _stage(runs, run_id, Stage.AUDIT, body, should_cancel)
+
+
+def execute_run(
+    *,
+    workspace: Path,
+    runs: RunStore,
+    run_id: str,
+    should_cancel: Callable[[], bool] | None = None,
+) -> RunRecord:
+    """Advance a run through `ingest → profile → audit`, honouring `--stop-after`.
+
+    Stages run once and in order (§5.3). A stage that does not complete stops
+    the pipeline where it is — the run's status already says why, and running
+    the next stage over data the previous one could not finish is how a
+    half-analyzed dataset produces a report (§5.4).
+    """
+    record = runs.get(run_id)
+    stop_after = record.request.stop_after
+    stages = (
+        (Stage.INGEST, execute_ingest),
+        (Stage.PROFILE, execute_profile),
+        (Stage.AUDIT, execute_audit),
+    )
+
+    for stage, execute in stages:
+        if stage in record.stages_completed:
+            continue
+        record = execute(workspace=workspace, runs=runs, run_id=run_id, should_cancel=should_cancel)
+        if stage not in record.stages_completed:
+            return record
+        if stop_after is not None and stage is stop_after:
+            return record
+        if stage is Stage.INGEST and record.coverage is not None and record.coverage.incomplete:
+            # Not a failure — the ingest succeeded and its manifest and coverage
+            # are worth keeping. But savings are withheld entirely for this run
+            # (§11.4), so there is nothing for the later stages to produce.
+            runs.append_event(
+                run_id,
+                "coverage",
+                {
+                    "message": (
+                        "Stopping after ingest: coverage failed the §6.1 gate, so savings "
+                        "figures are withheld entirely for this run (§11.4)."
+                    )
+                },
+            )
+            return record
+
+    return record
+
+
+_Emit = Callable[[str, dict[str, Any]], None]
+
+
+def _stage(
+    runs: RunStore,
+    run_id: str,
+    stage: Stage,
+    body: Callable[[RunRecord, _Emit], RunRecord],
+    should_cancel: Callable[[], bool] | None,
+) -> RunRecord:
+    """Shared lifecycle for the stages that read what ingest already wrote.
+
+    Ingest has its own copy because it alone has partial data to discard on
+    failure; these two derive from `records.parquet` and leave it untouched, so
+    a failure here costs the derived artifact and nothing else.
+    """
+
+    def emit(event: str, payload: dict[str, Any]) -> None:
+        runs.append_event(run_id, event, payload)
+
+    record = runs.start_stage(run_id, stage)
+    try:
+        if should_cancel is not None and should_cancel():
+            raise RunCancelled(f"cancelled before the {stage.value} stage")
+        record = body(record, emit)
+        runs.complete_stage(run_id, stage)
+        status = (
+            RunStatus.INCOMPLETE
+            if record.coverage is not None and record.coverage.incomplete
+            else RunStatus.COMPLETE
+        )
+        return runs.set_status(run_id, status)
+
+    except RunCancelled as exc:
+        emit("cancelled", {"message": str(exc)})
+        return runs.set_status(run_id, RunStatus.CANCELLED, error=str(exc))
+
+    except AuditorError as exc:
+        emit("error", {"message": str(exc)})
+        return runs.set_status(run_id, RunStatus.FAILED, error=str(exc))
+
+    except Exception as exc:
+        emit("error", {"message": f"{type(exc).__name__}: {exc}", "traceback": _tb()})
+        return runs.set_status(run_id, RunStatus.FAILED, error=f"{type(exc).__name__}: {exc}")
+
+
+def _records_of(runs: RunStore, run_id: str) -> RecordStore:
+    store = RecordStore(runs.artifact_path(run_id, RECORDS_PARQUET))
+    if not store.exists():
+        raise AuditorError(
+            f"run {run_id} has no records.parquet — it was purged under retention, or ingest "
+            f"did not complete. There is nothing to analyze (§5.3)."
+        )
+    return store
+
+
 def _discard_partial_records(runs: RunStore, run_id: str) -> None:
     """A half-ingested dataset must never be analyzable (§5.4)."""
     RecordStore(runs.artifact_path(run_id, RECORDS_PARQUET)).drop()
@@ -226,7 +446,7 @@ class RunQueue:
         heartbeat = _Heartbeat(self.runs, run_id)
         heartbeat.start()
         try:
-            execute_ingest(
+            execute_run(
                 workspace=self.workspace,
                 runs=self.runs,
                 run_id=run_id,

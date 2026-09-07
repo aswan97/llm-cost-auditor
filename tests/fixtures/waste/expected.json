@@ -1,0 +1,82 @@
+{
+  "window": "2026-08-01..2026-08-31",
+  "timezone": "UTC",
+  "catalog_version": "waste-test-1",
+
+  "raw_lines": 12,
+  "records_outside_window": 1,
+  "duplicates_collapsed": 1,
+  "records": 10,
+
+  "baseline_usd_micros": 45300,
+
+  "workloads": {
+    "claims/extract": 8,
+    "unmapped": 2
+  },
+  "unmapped_records": 2,
+
+  "portfolio_usd_micros": 35500,
+
+  "by_confidence_usd_micros": {
+    "Measured": 11500,
+    "Estimated": 24000
+  },
+
+  "findings": [
+    {
+      "id": "waste.truncation.claims/extract",
+      "analyzer": "waste.truncation",
+      "confidence": "Estimated",
+      "requests": 1,
+      "standalone": { "low": 0, "expected": 24000, "high": 24000 },
+      "marginal": { "low": 0, "expected": 24000, "high": 24000 },
+      "absorbed_by": []
+    },
+    {
+      "id": "waste.retry_storm.claims/extract",
+      "analyzer": "waste.retry_storm",
+      "confidence": "Measured",
+      "requests": 1,
+      "standalone": { "low": 5000, "expected": 5000, "high": 5000 },
+      "marginal": { "low": 5000, "expected": 5000, "high": 5000 },
+      "absorbed_by": []
+    },
+    {
+      "id": "waste.cancelled_stream.unmapped",
+      "analyzer": "waste.cancelled_stream",
+      "confidence": "Measured",
+      "requests": 1,
+      "standalone": { "low": 3700, "expected": 3700, "high": 3700 },
+      "marginal": { "low": 3700, "expected": 3700, "high": 3700 },
+      "absorbed_by": []
+    },
+    {
+      "id": "waste.billed_failure.claims/extract",
+      "analyzer": "waste.billed_failure",
+      "confidence": "Measured",
+      "requests": 2,
+      "standalone": { "low": 7000, "expected": 7000, "high": 7000 },
+      "marginal": { "low": 2000, "expected": 2000, "high": 2000 },
+      "absorbed_by": ["waste.retry_storm.claims/extract"]
+    },
+    {
+      "id": "waste.billed_failure.unmapped",
+      "analyzer": "waste.billed_failure",
+      "confidence": "Measured",
+      "requests": 1,
+      "standalone": { "low": 800, "expected": 800, "high": 800 },
+      "marginal": { "low": 800, "expected": 800, "high": 800 },
+      "absorbed_by": []
+    },
+    {
+      "id": "waste.rate_limit_churn.claims/extract",
+      "analyzer": "waste.rate_limit_churn",
+      "confidence": "Measured",
+      "requests": 1,
+      "standalone": { "low": 0, "expected": 0, "high": 0 },
+      "marginal": { "low": 0, "expected": 0, "high": 0 },
+      "absorbed_by": []
+    }
+  ]
+}

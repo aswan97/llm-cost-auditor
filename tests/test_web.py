@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import time
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -52,11 +53,17 @@ def test_pages_render(client: Any) -> None:
 
 
 def test_every_page_states_what_this_build_does_not_do(client: Any) -> None:
-    """A styled dashboard reads as fact; the honest version says what is missing (§15.6)."""
+    """A styled dashboard reads as fact; the honest version says what is missing (§15.6).
+
+    The banner names the analyzers that exist and the ones that do not. It has
+    to move when they do — a build note that has drifted out of date is worse
+    than none, because it is read as current.
+    """
     for path in ("/", "/connections", "/runs/new"):
         body = " ".join(client.get(path).text.lower().split())
-        assert "there are no analyzers yet" in body
-        assert "no page here shows a finding, a saving, or a recommendation" in body
+        assert "waste findings" in body
+        assert "no cache, batching, or routing analyzers yet" in body
+        assert "no run shows a monthly projection" in body
 
 
 def test_no_dollar_figure_appears_where_nothing_was_priced(client: Any) -> None:
@@ -353,10 +360,121 @@ def test_the_app_and_the_cli_agree_figure_by_figure(client: Any, workspace: Path
     ]
 
     html = client.get(f"/runs/{run_id}/cost").text
-    assert direct.total in html, "the rendered total must be the computed one"
+    # Escaped, because a sub-cent figure renders as `<$0.01` and Jinja escapes
+    # the `<`. The browser shows the same string the CLI prints.
+    assert escape(direct.total) in html, "the rendered total must be the computed one"
     for row in direct.by_model:
-        assert row.spend in html
+        assert escape(row.spend) in html
         assert row.label in html
+
+
+def test_a_run_started_in_the_app_reaches_the_audit_stage(client: Any) -> None:
+    """The app submits all three stages (§5.3), and the page shows each one's output."""
+    run_id = completed_run(client)
+    record = client.get(f"/api/runs/{run_id}").json()
+    assert record["stages_completed"] == ["ingest", "profile", "audit"]
+    assert record["finding_count"] > 0
+
+    page = client.get(f"/runs/{run_id}").text
+    assert "Workloads" in page
+    assert "unmapped" in page
+    # What the grouping cannot see is on the page, not left to be assumed from
+    # a table that looks complete (§8.2).
+    assert "template fingerprinting" in page
+
+
+def test_the_findings_panel_and_findings_json_agree_figure_by_figure(
+    client: Any, workspace: Path
+) -> None:
+    """The check AGENTS.md asks for: two surfaces over one run record.
+
+    Both render `findings.json`, so a discrepancy here is a defect by
+    definition. The panel formats integers the engine wrote; it does not
+    recompute anything, which is what makes that true rather than lucky.
+    """
+    from llm_cost_auditor.baseline import format_usd
+    from llm_cost_auditor.run_store import RunStore
+
+    run_id = completed_run(client)
+    stored = RunStore(workspace).read_findings(run_id)
+    assert stored is not None and stored.findings
+
+    api = client.get(f"/api/runs/{run_id}/findings").json()
+    assert api["run_id"] == run_id
+    assert [f["id"] for f in api["findings"]] == [f.id for f in stored.findings]
+
+    html = client.get(f"/runs/{run_id}/findings").text
+    assert escape(format_usd(stored.portfolio_usd_micros)) in html
+    for finding in stored.findings:
+        assert finding.id in html
+        assert escape(format_usd(finding.savings.gross_marginal.expected_usd_micros)) in html
+        assert finding.confidence.value in html
+
+    # The portfolio is the sum of marginals and nothing else (§11.2).
+    assert stored.portfolio_usd_micros == sum(
+        f["savings"]["gross_marginal"]["expected_usd_micros"] for f in api["findings"]
+    )
+
+
+def test_a_marginal_shrunk_by_another_finding_names_it_on_the_page(client: Any) -> None:
+    """`$0.00` next to a real standalone must not read as "worthless" (§11.2)."""
+    run_id = completed_run(client)
+    html = client.get(f"/runs/{run_id}/findings").text
+    assert "is already credited to" in html
+    assert "waste.retry_storm" in html
+
+
+def test_findings_before_an_audit_are_a_409_not_an_empty_set(client: Any) -> None:
+    """ "Not yet" is a retry; "never" is not, and a caller must be able to tell."""
+    response = client.post(
+        "/runs/start",
+        headers=token(client),
+        data={"connection_ids": ["local-anthropic"], "csrf_token": client.cookies["lca_csrf"]},
+        follow_redirects=False,
+    )
+    run_id = response.headers["location"].rsplit("/", 1)[-1]
+
+    early = client.get(f"/api/runs/{run_id}/findings")
+    assert early.status_code in (200, 409)
+    if early.status_code == 409:
+        assert "audit stage has not run" in early.json()["detail"]
+
+    wait_for_terminal(client, run_id)
+    assert client.get(f"/api/runs/{run_id}/findings").status_code == 200
+
+
+def test_the_panel_never_reads_as_a_clean_bill_of_health_when_nothing_was_analyzed(
+    client: Any, workspace: Path
+) -> None:
+    """A finding set with no analyzed records must not render as "no waste found".
+
+    The empty list is identical either way, so this is a template branch that
+    would be invisible in review — and the wrong branch is the tool asserting
+    the traffic was fine when it never looked at it.
+    """
+    from llm_cost_auditor.findings import new_finding_set
+    from llm_cost_auditor.run_store import RunStore
+
+    run_id = completed_run(client)
+    runs = RunStore(workspace)
+
+    empty = new_finding_set(run_id, catalog_version="test-1")
+    empty.analyzed_records = 0
+    empty.withheld_reasons = ["12 record(s) on acme/ghost-model have no catalog rate."]
+    runs.write_findings(run_id, empty)
+
+    html = client.get(f"/runs/{run_id}/findings").text
+    assert "Nothing was analyzed" in html
+    assert "billed for work that was used" not in html
+    assert "ghost-model" in html
+
+
+def test_there_is_no_write_route_for_findings(client: Any) -> None:
+    """Findings are engine output. Nothing on this surface may edit one."""
+    run_id = completed_run(client)
+    for method in (client.post, client.put, client.delete, client.patch):
+        response = method(f"/api/runs/{run_id}/findings", headers=token(client))
+        assert response.status_code == 405
 
 
 def test_money_crosses_the_api_as_integer_micros_never_a_float(client: Any) -> None:

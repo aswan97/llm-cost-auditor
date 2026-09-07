@@ -4,18 +4,21 @@ A self-hosted platform that ingests LLM provider API logs and produces a ranked,
 
 It runs on your own infrastructure, two ways over one engine: a **local web app** for analysts and engineers to run audits and browse findings, and a **CLI** for automation and CI gates. A run started in one is visible in the other.
 
-> **Status: ingest stage.** [SPEC.md](SPEC.md) describes the finished v1. What is
-> **built today** is the first slice of it: the local-files connector, the decode
-> layer, the Anthropic source adapter, retry/duplicate-delivery classification,
-> the run store, the coverage panel, and the CLI and web app that render a run.
+> **Status: waste findings.** [SPEC.md](SPEC.md) describes the finished v1. What
+> is **built today** is the first working audit: the local-files connector, the
+> decode layer, the Anthropic source adapter, retry/duplicate-delivery
+> classification, the run store, the coverage panel, the pricing engine, workload
+> discovery, and the waste findings of §9.1 — billed retries, billed failures,
+> truncations, cancelled streams, and rate-limit churn. `run` executes
+> `ingest → profile → audit` and prints a report; the app renders the same run.
 >
-> There is **no pricing engine and there are no analyzers yet**, so nothing in
-> the tool produces a dollar figure or a finding. The pages and commands below
-> that describe savings, reports, and verification are the intended v1, not
-> working software. Everything the app displays today is read from a run record
-> on disk — there is no mock data anywhere, which is deliberate: a page that
-> renders plausible fake numbers is the exact failure this project exists to
-> prevent.
+> There are **no cache, batching, or routing analyzers yet**, and no monthly
+> projection: the pages and commands below that describe caching, model routing,
+> shadow replay, and verification are the intended v1, not working software.
+> Everything the tool displays is computed from a run record on disk and the
+> price catalog — there is no mock data anywhere, which is deliberate: a page
+> that renders plausible fake numbers is the exact failure this project exists
+> to prevent.
 >
 > Try it: [Running it](#running-it).
 
