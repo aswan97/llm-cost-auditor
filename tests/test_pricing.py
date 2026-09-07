@@ -221,6 +221,16 @@ def test_a_non_usd_row_is_a_config_error_never_a_conversion(tmp_path: Path) -> N
         pricing.catalog(bad)
 
 
+def test_a_non_per_mtok_row_is_a_config_error(tmp_path: Path) -> None:
+    bad = tmp_path / "per_image.yaml"
+    bad.write_text(
+        CATALOG.read_text(encoding="utf-8").replace("units: per_mtok", "units: per_image", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="not supported"):
+        pricing.catalog(bad)
+
+
 # --- provenance ---------------------------------------------------------------
 
 
